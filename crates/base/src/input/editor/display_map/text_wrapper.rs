@@ -498,9 +498,19 @@ impl WrapDisplayPoint {
 }
 
 /// The layout info of a line with soft wrapped lines.
+///
+/// Offsets passed to and returned from the index/position helpers are *raw*
+/// (buffer) byte offsets relative to the start of the buffer line. The shaped
+/// `wrapped_lines` hold the *display* text, which is the raw text with the
+/// `concealed` byte ranges removed; the helpers translate between the two.
+/// Without conceals both spaces are identical and translation is a no-op.
 pub(crate) struct LineLayout {
-    /// Total bytes length of this line.
-    len: usize,
+    /// Total bytes length of the shaped (display) text of this line, i.e. the
+    /// sum of the `wrapped_lines` lengths. See [`Self::len`] for the raw length.
+    display_len: usize,
+    /// Raw byte ranges (relative to the line start, sorted, non-overlapping,
+    /// non-empty) removed from the display text.
+    concealed: Vec<Range<usize>>,
     /// The soft wrapped lines of this line (Include the first line).
     pub(crate) wrapped_lines: SmallVec<[ShapedLine; 1]>,
     /// Extra left offset applied to continuation wrapped lines, used to reserve the first line's
@@ -515,7 +525,8 @@ pub(crate) struct LineLayout {
 impl LineLayout {
     pub(crate) fn new() -> Self {
         Self {
-            len: 0,
+            display_len: 0,
+            concealed: Vec::new(),
             longest_width: px(0.),
             wrapped_lines: SmallVec::new(),
             wrap_indent: px(0.),
@@ -547,7 +558,7 @@ impl LineLayout {
     }
 
     pub(crate) fn set_wrapped_lines(&mut self, wrapped_lines: SmallVec<[ShapedLine; 1]>) {
-        self.len = wrapped_lines.iter().map(|l| l.len).sum();
+        self.display_len = wrapped_lines.iter().map(|l| l.len).sum();
         let width = wrapped_lines
             .iter()
             .map(|l| l.width)
@@ -585,9 +596,43 @@ impl LineLayout {
         self
     }
 
+    /// Set the concealed raw byte ranges of this line (relative to the line
+    /// start). The ranges are normalized: clamped to be non-empty, sorted, and
+    /// merged when overlapping or touching.
+    ///
+    /// The `wrapped_lines` must have been shaped from the raw text with these
+    /// ranges removed; see [`Self::raw_to_display`].
+    pub(crate) fn with_concealed(mut self, concealed: Vec<Range<usize>>) -> Self {
+        self.concealed = normalize_concealed(concealed);
+        self
+    }
+
+    /// Raw bytes length of this line (display length plus concealed bytes).
     #[inline]
     pub(crate) fn len(&self) -> usize {
-        self.len
+        self.display_len + self.concealed.iter().map(|r| r.len()).sum::<usize>()
+    }
+
+    /// Translate a raw (buffer) byte offset, relative to the line start, to the
+    /// byte offset in the display text (with concealed bytes removed).
+    ///
+    /// Offsets inside a concealed range collapse to the display position of
+    /// that range's start. Offsets beyond the end are shifted by the total
+    /// concealed length (so `raw_to_display(len()) == display_len`, and
+    /// `len() + 1` maps to `display_len + 1`).
+    #[inline]
+    pub(crate) fn raw_to_display(&self, raw: usize) -> usize {
+        raw_to_display(&self.concealed, raw)
+    }
+
+    /// Translate a byte offset in the display text back to a raw (buffer) byte
+    /// offset relative to the line start.
+    ///
+    /// A display offset at the boundary where a concealed range was removed
+    /// maps to the *start* of that range (before the hidden bytes).
+    #[inline]
+    pub(crate) fn display_to_raw(&self, display: usize) -> usize {
+        display_to_raw(&self.concealed, display)
     }
 
     /// Get the position (x, y) for the given index in this line layout.
@@ -602,6 +647,8 @@ impl LineLayout {
         last_layout: &LastLayout,
         line_end_affinity: bool,
     ) -> Option<Point<Pixels>> {
+        // Work in display space: the shaped lines do not contain concealed bytes.
+        let offset = self.raw_to_display(offset);
         let mut acc_len = 0;
         let mut offset_y = px(0.);
 
@@ -638,6 +685,8 @@ impl LineLayout {
     }
 
     /// Get the closest index for the given x in this line layout.
+    ///
+    /// The return value is a raw (buffer) byte offset relative to the line start.
     pub(crate) fn closest_index_for_x(&self, x: Pixels, last_layout: &LastLayout) -> usize {
         let mut acc_len = 0;
         let x_offset = last_layout.alignment_offset(self.longest_width);
@@ -654,18 +703,18 @@ impl LineLayout {
                     ix = ix.saturating_sub(c_len);
                 }
 
-                return acc_len + ix;
+                return self.display_to_raw(acc_len + ix);
             }
             acc_len += line.text.len();
         }
 
-        acc_len
+        self.display_to_raw(acc_len)
     }
 
     /// Get the index for the given position (x, y) in this line layout.
     ///
     /// The `pos` is relative to the top-left corner of this line layout, start from (0, 0)
-    /// The return value is a local byte index in this line layout, start from 0.
+    /// The return value is a local raw (buffer) byte index in this line layout, start from 0.
     pub(crate) fn closest_index_for_position(
         &self,
         pos: Point<Pixels>,
@@ -684,7 +733,7 @@ impl LineLayout {
                     let c_len = line.text.chars().last().map(|c| c.len_utf8()).unwrap_or(0);
                     ix = ix.saturating_sub(c_len);
                 }
-                return Some(offset + ix);
+                return Some(self.display_to_raw(offset + ix));
             }
 
             offset += line.text.len();
@@ -694,6 +743,10 @@ impl LineLayout {
         None
     }
 
+    /// Get the index for the given position (x, y) in this line layout, or
+    /// `None` when the position is not over a glyph.
+    ///
+    /// The return value is a local raw (buffer) byte index in this line layout.
     pub(crate) fn index_for_position(
         &self,
         pos: Point<Pixels>,
@@ -706,7 +759,7 @@ impl LineLayout {
             let line_bottom = line_top + last_layout.line_height;
             if pos.y >= line_top && pos.y < line_bottom {
                 let ix = line.index_for_x(pos.x - x_offset - self.line_indent(i))?;
-                return Some(offset + ix);
+                return Some(self.display_to_raw(offset + ix));
             }
 
             offset += line.text.len();
@@ -765,6 +818,58 @@ impl LineLayout {
             }
         }
     }
+}
+
+/// Sort, drop empty, and merge overlapping/touching concealed ranges.
+pub(crate) fn normalize_concealed(mut concealed: Vec<Range<usize>>) -> Vec<Range<usize>> {
+    concealed.retain(|r| r.end > r.start);
+    if concealed.len() <= 1 {
+        return concealed;
+    }
+    concealed.sort_by_key(|r| (r.start, r.end));
+    let mut merged: Vec<Range<usize>> = Vec::with_capacity(concealed.len());
+    for r in concealed {
+        if let Some(last) = merged.last_mut()
+            && r.start <= last.end
+        {
+            last.end = last.end.max(r.end);
+        } else {
+            merged.push(r);
+        }
+    }
+    merged
+}
+
+/// Translate a raw byte offset to a display byte offset, given the sorted,
+/// non-overlapping `concealed` raw ranges. See [`LineLayout::raw_to_display`].
+fn raw_to_display(concealed: &[Range<usize>], raw: usize) -> usize {
+    let mut removed = 0;
+    for r in concealed {
+        if raw < r.start {
+            break;
+        }
+        if raw < r.end {
+            // Inside a concealed range: collapse to its start.
+            return r.start - removed;
+        }
+        removed += r.len();
+    }
+    raw - removed
+}
+
+/// Translate a display byte offset back to a raw byte offset, given the sorted,
+/// non-overlapping `concealed` raw ranges. See [`LineLayout::display_to_raw`].
+fn display_to_raw(concealed: &[Range<usize>], display: usize) -> usize {
+    let mut removed = 0;
+    for r in concealed {
+        // Display position at which this concealed range was removed.
+        let display_start = r.start - removed;
+        if display <= display_start {
+            break;
+        }
+        removed += r.len();
+    }
+    display + removed
 }
 
 #[cfg(test)]
@@ -1359,5 +1464,170 @@ mod tests {
             line_layout.position_for_index(6, &last_layout, false),
             Some(point(px(20.), px(20.))),
         )
+    }
+
+    #[test]
+    fn test_normalize_concealed() {
+        assert_eq!(normalize_concealed(vec![]), Vec::<Range<usize>>::new());
+        assert_eq!(
+            normalize_concealed(vec![3..3, 5..5]),
+            Vec::<Range<usize>>::new()
+        );
+        assert_eq!(
+            normalize_concealed(vec![10..12, 0..2, 5..7]),
+            vec![0..2, 5..7, 10..12]
+        );
+        // Overlapping and touching ranges are merged.
+        assert_eq!(
+            normalize_concealed(vec![0..3, 2..5, 5..6, 8..9]),
+            vec![0..6, 8..9]
+        );
+    }
+
+    #[test]
+    fn test_byte_map_identity() {
+        let layout =
+            LineLayout::new().lines(smallvec::smallvec![ShapedLine::default().with_len(10)]);
+        assert_eq!(layout.len(), 10);
+        for i in 0..=12 {
+            assert_eq!(layout.raw_to_display(i), i);
+            assert_eq!(layout.display_to_raw(i), i);
+        }
+    }
+
+    #[test]
+    fn test_byte_map_conceal_at_start() {
+        // Raw "# Hello" (7 bytes), concealed "# " (0..2) -> display "Hello" (5 bytes).
+        let layout = LineLayout::new()
+            .lines(smallvec::smallvec![ShapedLine::default().with_len(5)])
+            .with_concealed(vec![0..2]);
+        assert_eq!(layout.len(), 7);
+
+        assert_eq!(layout.raw_to_display(0), 0);
+        assert_eq!(layout.raw_to_display(1), 0); // inside concealed -> collapse to its start
+        assert_eq!(layout.raw_to_display(2), 0);
+        assert_eq!(layout.raw_to_display(3), 1);
+        assert_eq!(layout.raw_to_display(7), 5);
+        // Beyond the end: shifted by the total concealed length.
+        assert_eq!(layout.raw_to_display(8), 6);
+
+        assert_eq!(layout.display_to_raw(0), 0); // before the hidden bytes
+        assert_eq!(layout.display_to_raw(1), 3);
+        assert_eq!(layout.display_to_raw(5), 7);
+        assert_eq!(layout.display_to_raw(6), 8);
+    }
+
+    #[test]
+    fn test_byte_map_conceal_in_middle() {
+        // Raw "a **b** c" (9 bytes), concealed "**" at 2..4 and 5..7 -> display "a b c".
+        let layout = LineLayout::new()
+            .lines(smallvec::smallvec![ShapedLine::default().with_len(5)])
+            .with_concealed(vec![5..7, 2..4]);
+        assert_eq!(layout.len(), 9);
+
+        let expected_r2d = [0, 1, 2, 2, 2, 3, 3, 3, 4, 5, 6];
+        for (raw, display) in expected_r2d.into_iter().enumerate() {
+            assert_eq!(layout.raw_to_display(raw), display, "raw {raw}");
+        }
+
+        assert_eq!(layout.display_to_raw(0), 0);
+        assert_eq!(layout.display_to_raw(1), 1);
+        assert_eq!(layout.display_to_raw(2), 2); // boundary -> start of the hidden range
+        assert_eq!(layout.display_to_raw(3), 5);
+        assert_eq!(layout.display_to_raw(4), 8);
+        assert_eq!(layout.display_to_raw(5), 9);
+        assert_eq!(layout.display_to_raw(7), 11);
+
+        // Round trip from display space is stable.
+        for display in 0..=6 {
+            assert_eq!(
+                layout.raw_to_display(layout.display_to_raw(display)),
+                display
+            );
+        }
+    }
+
+    #[test]
+    fn test_byte_map_conceal_at_end() {
+        // Raw "Hello   " (8 bytes), concealed trailing 5..8 -> display "Hello".
+        let layout = LineLayout::new()
+            .lines(smallvec::smallvec![ShapedLine::default().with_len(5)])
+            .with_concealed(vec![5..8]);
+        assert_eq!(layout.len(), 8);
+        assert_eq!(layout.raw_to_display(5), 5);
+        assert_eq!(layout.raw_to_display(6), 5);
+        assert_eq!(layout.raw_to_display(8), 5);
+        assert_eq!(layout.raw_to_display(9), 6);
+        assert_eq!(layout.display_to_raw(5), 5);
+        assert_eq!(layout.display_to_raw(6), 9);
+    }
+
+    #[test]
+    fn test_byte_map_position_and_index_use_raw_offsets() {
+        // Two visual lines shaped from display text: raw "**ab**cd" (8 bytes)
+        // wrapped as raw 0..4 ("**ab" -> display "ab") and 4..8 ("**cd" -> "cd").
+        let layout = LineLayout::new()
+            .lines(smallvec::smallvec![
+                ShapedLine::default().with_len(2),
+                ShapedLine::default().with_len(2),
+            ])
+            .with_concealed(vec![0..2, 4..6]);
+        assert_eq!(layout.len(), 8);
+
+        let last_layout = LastLayout {
+            visible_range: 0..1,
+            visible_buffer_lines: vec![0],
+            visible_line_byte_offsets: vec![0],
+            visible_top: px(0.),
+            visible_range_offset: 0..0,
+            lines: Rc::new(vec![]),
+            line_height: px(20.),
+            wrap_width: Some(px(10.)),
+            wrapping_indent: WrappingIndent::None,
+            line_number_width: px(0.),
+            cursor_bounds: None,
+            text_align: TextAlign::Left,
+            content_width: px(0.),
+        };
+
+        // Raw offsets inside the first wrapped range stay on row 0 ...
+        assert_eq!(
+            layout
+                .position_for_index(0, &last_layout, false)
+                .map(|p| p.y),
+            Some(px(0.))
+        );
+        assert_eq!(
+            layout
+                .position_for_index(3, &last_layout, false)
+                .map(|p| p.y),
+            Some(px(0.))
+        );
+        // ... the wrap boundary (raw 4, display 2) belongs to the second row ...
+        assert_eq!(
+            layout
+                .position_for_index(4, &last_layout, false)
+                .map(|p| p.y),
+            Some(px(20.))
+        );
+        assert_eq!(
+            layout
+                .position_for_index(8, &last_layout, false)
+                .map(|p| p.y),
+            Some(px(20.))
+        );
+        // ... and past the raw end (the `\n`) there is no position.
+        assert_eq!(layout.position_for_index(9, &last_layout, false), None);
+
+        // Hit-testing returns raw offsets (the default shaped line has zero
+        // width, so every x maps to display index 0 of the row).
+        assert_eq!(
+            layout.closest_index_for_position(point(px(0.), px(25.)), &last_layout),
+            Some(4)
+        );
+        assert_eq!(
+            layout.index_for_position(point(px(0.), px(25.)), &last_layout),
+            None
+        );
     }
 }
