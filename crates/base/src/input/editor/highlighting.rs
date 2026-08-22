@@ -52,6 +52,35 @@ pub trait InputHighlighter {
         let _ = range;
         self.fold_ranges(text)
     }
+
+    /// Byte ranges inside `range` (buffer offsets) that the editor hides from
+    /// display: the text is laid out as if those bytes were not there (zero
+    /// width), while hit-testing, caret placement, and selections keep working
+    /// in buffer offsets.
+    ///
+    /// `range` covers exactly one buffer line (without its trailing `\n`) and
+    /// is queried once per visible line on every layout. The returned ranges
+    /// must be sorted, non-overlapping, within `range`, and on char boundaries.
+    /// The engine does not treat the caret line specially: the implementation
+    /// is responsible for returning no ranges on the line that holds the caret
+    /// (so the raw text shows there) if that is the desired behavior.
+    ///
+    /// Default: conceal nothing.
+    fn conceals(&self, range: &Range<usize>) -> Vec<Range<usize>> {
+        let _ = range;
+        Vec::new()
+    }
+
+    /// Font-size multiplier for the buffer line covering `line_range` (buffer
+    /// offsets of the line, without its trailing `\n`), e.g. `1.3` for an H1
+    /// line. Rows stay uniformly `line_height` tall; the application picks a
+    /// line height that fits the largest scale it returns.
+    ///
+    /// Default: `1.0` (no change).
+    fn line_font_scale(&self, line_range: &Range<usize>) -> f32 {
+        let _ = line_range;
+        1.0
+    }
 }
 
 pub type InputHighlighterFactory = Rc<dyn Fn(&str) -> Option<Box<dyn InputHighlighter>>>;
