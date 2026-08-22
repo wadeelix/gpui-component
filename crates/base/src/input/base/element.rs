@@ -17,7 +17,11 @@ use std::{ops::Range, rc::Rc};
 
 use crate::{
     Scrollbar,
-    input::{RopeExt as _, blink_cursor::CURSOR_WIDTH, display_map::LineLayout},
+    input::{
+        InputHighlighter, RopeExt as _,
+        blink_cursor::CURSOR_WIDTH,
+        display_map::{LineLayout, normalize_concealed},
+    },
 };
 
 use super::{
@@ -1342,6 +1346,20 @@ impl<M: InputModeKind> TextElement<M> {
         // only cover visible (non-folded) lines.
         let mut run_offset = 0;
 
+        // Concealment and per-line font scale come from the code-editor
+        // highlighter. Concealed ranges are raw buffer offsets, so they only
+        // apply when the display text is the raw text (not masked).
+        let highlighter = if state.masked {
+            None
+        } else {
+            state
+                .mode
+                .highlighter()
+                .and_then(|cell| cell.try_borrow().ok())
+        };
+        let highlighter: Option<&dyn InputHighlighter> =
+            highlighter.as_ref().and_then(|h| h.as_deref());
+
         for (vi, &buffer_line) in last_layout.visible_buffer_lines.iter().enumerate() {
             let line_text: String = display_text.slice_line(buffer_line).into();
             let line_item = state
@@ -1350,6 +1368,25 @@ impl<M: InputModeKind> TextElement<M> {
                 .expect("line should exists in wrapper");
 
             debug_assert_eq!(line_item.len(), line_text.len());
+
+            // Raw byte ranges (relative to the line start) hidden from display,
+            // and the font-size multiplier for this line.
+            let (concealed, line_font_size) = match highlighter {
+                Some(highlighter) => {
+                    let line_start = last_layout.visible_line_byte_offsets[vi];
+                    let line_range = line_start..line_start + line_text.len();
+                    let concealed =
+                        line_conceals(highlighter.conceals(&line_range), &line_range, &line_text);
+                    let scale = highlighter.line_font_scale(&line_range);
+                    let line_font_size = if scale.is_finite() && scale > 0. && scale != 1.0 {
+                        font_size * scale
+                    } else {
+                        font_size
+                    };
+                    (concealed, line_font_size)
+                }
+                None => (Vec::new(), font_size),
+            };
 
             let mut wrapped_lines: SmallVec<[ShapedLine; 1]> = SmallVec::with_capacity(1);
 
@@ -1365,30 +1402,41 @@ impl<M: InputModeKind> TextElement<M> {
                     )
                 };
 
-                let sub_line: SharedString = line_text[range.clone()].to_string().into();
+                // The shaped (display) text is the raw wrapped range with the
+                // concealed bytes removed; runs shrink accordingly.
+                let (sub_line, line_runs): (SharedString, Vec<TextRun>) = if concealed.is_empty() {
+                    (line_text[range.clone()].to_string().into(), line_runs)
+                } else {
+                    conceal_wrapped_line(&line_text, range, &concealed, line_runs)
+                };
                 let line_runs =
                     align_runs_to_char_boundaries(&sub_line, &line_runs).unwrap_or(line_runs);
-                let shaped_line = window
-                    .text_system()
-                    .shape_line(sub_line, font_size, &line_runs, None);
+                let shaped_line =
+                    window
+                        .text_system()
+                        .shape_line(sub_line, line_font_size, &line_runs, None);
 
                 wrapped_lines.push(shaped_line);
             }
 
+            let line_layout = LineLayout::new()
+                .lines(wrapped_lines)
+                .with_concealed(concealed);
+
             // Use the first visual line's indentation width for continuation lines.
-            let wrap_indent = if line_item.indent > 0 && wrapped_lines.len() > 1 {
+            let wrap_indent = if line_item.indent > 0 && line_layout.wrapped_lines.len() > 1 {
                 let indent_byte_len = line_text
                     .char_indices()
                     .nth(line_item.indent as usize)
                     .map(|(ix, _)| ix)
                     .unwrap_or(line_text.len());
-                wrapped_lines[0].x_for_index(indent_byte_len)
+                line_layout.wrapped_lines[0]
+                    .x_for_index(line_layout.raw_to_display(indent_byte_len))
             } else {
                 px(0.)
             };
 
-            let line_layout = LineLayout::new()
-                .lines(wrapped_lines)
+            let line_layout = line_layout
                 .wrap_indent(wrap_indent)
                 .with_whitespaces(whitespace_indicators.clone());
             lines.push(line_layout);
@@ -2389,6 +2437,92 @@ fn placeholder_line_runs<'a>(
     result
 }
 
+/// Normalize the highlighter's concealed ranges for one buffer line.
+///
+/// `conceals` are absolute buffer byte ranges; `line_range` is the line's
+/// absolute byte range (without the `\n`) and `line_text` its text. Returns
+/// ranges relative to the line start, clamped to the line, snapped outwards to
+/// char boundaries, sorted, merged, and non-empty.
+pub(super) fn line_conceals(
+    conceals: Vec<Range<usize>>,
+    line_range: &Range<usize>,
+    line_text: &str,
+) -> Vec<Range<usize>> {
+    if conceals.is_empty() {
+        return conceals;
+    }
+
+    let relative: Vec<Range<usize>> = conceals
+        .into_iter()
+        .filter_map(|r| {
+            let start = r.start.max(line_range.start).min(line_range.end) - line_range.start;
+            let end = r.end.max(line_range.start).min(line_range.end) - line_range.start;
+            if end <= start {
+                return None;
+            }
+            let mut start = start;
+            while !line_text.is_char_boundary(start) {
+                start -= 1;
+            }
+            let mut end = end;
+            while !line_text.is_char_boundary(end) {
+                end += 1;
+            }
+            Some(start..end)
+        })
+        .collect();
+
+    normalize_concealed(relative)
+}
+
+/// Build the display text and runs of the wrapped raw `range` of `line_text`
+/// with the `concealed` raw ranges (relative to the line start, normalized)
+/// removed. `runs` are the raw runs covering `range`, in order.
+pub(super) fn conceal_wrapped_line(
+    line_text: &str,
+    range: &Range<usize>,
+    concealed: &[Range<usize>],
+    runs: Vec<TextRun>,
+) -> (SharedString, Vec<TextRun>) {
+    let mut text = String::with_capacity(range.len());
+    let mut cursor = range.start;
+    for hidden in concealed {
+        if hidden.end <= range.start {
+            continue;
+        }
+        if hidden.start >= range.end {
+            break;
+        }
+        let hide_start = hidden.start.max(cursor);
+        let hide_end = hidden.end.min(range.end);
+        if hide_start > cursor {
+            text.push_str(&line_text[cursor..hide_start]);
+        }
+        cursor = cursor.max(hide_end);
+    }
+    if cursor < range.end {
+        text.push_str(&line_text[cursor..range.end]);
+    }
+
+    // Each run loses the bytes that fall inside a concealed range.
+    let mut result = Vec::with_capacity(runs.len());
+    let mut run_start = range.start;
+    for run in runs {
+        let run_end = run_start + run.len;
+        let hidden: usize = concealed
+            .iter()
+            .map(|c| c.end.min(run_end).saturating_sub(c.start.max(run_start)))
+            .sum();
+        let len = run.len.saturating_sub(hidden);
+        if len > 0 {
+            result.push(TextRun { len, ..run });
+        }
+        run_start = run_end;
+    }
+
+    (text.into(), result)
+}
+
 /// Get the runs for the given range.
 ///
 /// The range is the byte range of the wrapped line.
@@ -3190,6 +3324,93 @@ mod tests {
         assert_eq!(
             cursor_surrounding_padding(false, None, visible_lines, line_height),
             raw.min(half),
+        );
+    }
+
+    fn run(len: usize, color: Hsla) -> TextRun {
+        TextRun {
+            len,
+            font: gpui::font("Arial"),
+            color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        }
+    }
+
+    #[test]
+    fn test_line_conceals_clamps_snaps_and_normalizes() {
+        // Line "a 世界 b" at absolute 10..20 ("世" = 10..13, "界" = 13..16 relative 2..8).
+        let line_text = "a 世界 b";
+        let line_range = 10..10 + line_text.len();
+
+        // Empty stays empty.
+        assert!(line_conceals(vec![], &line_range, line_text).is_empty());
+
+        // Outside the line and empty ranges are dropped; overlapping ranges merge;
+        // offsets become relative to the line start.
+        assert_eq!(
+            line_conceals(
+                vec![0..5, 25..30, 12..12, 18..19, 11..12, 10..11],
+                &line_range,
+                line_text
+            ),
+            vec![0..2, 8..9]
+        );
+
+        // Off-char-boundary ends snap outwards to whole chars.
+        assert_eq!(
+            line_conceals(vec![13..14], &line_range, line_text),
+            vec![2..5]
+        );
+        // A range past the end is clamped to the line.
+        assert_eq!(
+            line_conceals(vec![19..40], &line_range, line_text),
+            vec![9..10]
+        );
+    }
+
+    #[test]
+    fn test_conceal_wrapped_line_removes_bytes_and_shrinks_runs() {
+        // Raw "**bold** x" (10 bytes), conceal the two "**" markers.
+        let line_text = "**bold** x";
+        let concealed = vec![0..2, 6..8];
+        let runs = vec![
+            run(2, gpui::red()),
+            run(4, gpui::blue()),
+            run(2, gpui::red()),
+            run(2, gpui::black()),
+        ];
+
+        let (text, runs) = conceal_wrapped_line(line_text, &(0..10), &concealed, runs);
+        assert_eq!(text.as_ref(), "bold x");
+        assert_eq!(
+            runs.iter().map(|r| (r.len, r.color)).collect::<Vec<_>>(),
+            vec![(4, gpui::blue()), (2, gpui::black())]
+        );
+
+        // A concealed range straddling a wrap boundary: each wrapped range only
+        // drops its own part.
+        let (text, runs) =
+            conceal_wrapped_line(line_text, &(0..7), &concealed, vec![run(7, gpui::red())]);
+        assert_eq!(text.as_ref(), "bold");
+        assert_eq!(runs.iter().map(|r| r.len).collect::<Vec<_>>(), vec![4]);
+        let (text, runs) =
+            conceal_wrapped_line(line_text, &(7..10), &concealed, vec![run(3, gpui::red())]);
+        assert_eq!(text.as_ref(), " x");
+        assert_eq!(runs.iter().map(|r| r.len).collect::<Vec<_>>(), vec![2]);
+
+        // A run fully inside a concealed range disappears; the rest is untouched.
+        let (text, runs) = conceal_wrapped_line(
+            "ab",
+            &(0..2),
+            &[0..1],
+            vec![run(1, gpui::red()), run(1, gpui::blue())],
+        );
+        assert_eq!(text.as_ref(), "b");
+        assert_eq!(
+            runs.iter().map(|r| (r.len, r.color)).collect::<Vec<_>>(),
+            vec![(1, gpui::blue())]
         );
     }
 }

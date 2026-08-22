@@ -3100,7 +3100,7 @@ mod tests {
     use super::*;
 
     use crate::theme::Theme;
-    use gpui::{TestAppContext, VisualTestContext};
+    use gpui::{HighlightStyle, TestAppContext, VisualTestContext};
 
     use crate::input::{EditorMode, InputMode, TextareaMode};
 
@@ -4623,6 +4623,155 @@ mod tests {
         editor
             .input
             .read_with(&mut editor_cx, |state, _| assert!(state.soft_wrap));
+    }
+
+    /// A highlighter that hides byte ranges and scales one line, for the
+    /// concealment (live-preview) layout path.
+    struct ConcealHighlighter {
+        /// Absolute buffer byte ranges to hide.
+        conceal: Vec<Range<usize>>,
+        /// Buffer line start offset whose line is drawn at 1.5x font size.
+        scaled_line_start: Option<usize>,
+    }
+
+    impl crate::input::InputHighlighter for ConcealHighlighter {
+        fn language(&self) -> SharedString {
+            "conceal-test".into()
+        }
+
+        fn update(
+            &mut self,
+            _edit: Option<crate::input::InputEdit>,
+            _text: &Rope,
+            _folding: bool,
+            _window: &mut Window,
+            _cx: &mut Context<crate::input::EditorState>,
+        ) {
+        }
+
+        fn styles(
+            &self,
+            range: &Range<usize>,
+            _resolver: &dyn crate::input::HighlightStyleResolver,
+        ) -> Vec<(Range<usize>, HighlightStyle)> {
+            vec![(range.clone(), HighlightStyle::default())]
+        }
+
+        fn fold_ranges(&self, _text: &Rope) -> Vec<crate::input::FoldRange> {
+            Vec::new()
+        }
+
+        fn conceals(&self, range: &Range<usize>) -> Vec<Range<usize>> {
+            self.conceal
+                .iter()
+                .filter(|r| r.start >= range.start && r.end <= range.end)
+                .cloned()
+                .collect()
+        }
+
+        fn line_font_scale(&self, line_range: &Range<usize>) -> f32 {
+            if Some(line_range.start) == self.scaled_line_start {
+                1.5
+            } else {
+                1.0
+            }
+        }
+    }
+
+    /// Concealed bytes take no width, caret/hit-testing stay in buffer
+    /// offsets, and a scaled line shapes its glyphs larger.
+    ///
+    /// The test text system gives every glyph 0.6em, so widths are exact.
+    #[gpui::test]
+    fn test_conceal_and_line_font_scale_layout(cx: &mut TestAppContext) {
+        // Line 0: "# Heading" (0..9), conceal "# " (0..2).
+        // Line 1: "body"      (10..14), control line.
+        // Line 2: "big"       (15..18), scaled 1.5x.
+        let input_view =
+            InputView::build_editor(cx, |state| state.default_value("# Heading\nbody\nbig"));
+        let mut cx = VisualTestContext::from_window(input_view.window_handle.into(), cx);
+        let input = input_view.input;
+
+        let factory: crate::input::InputHighlighterFactory = Rc::new(|_lang: &str| {
+            Some(Box::new(ConcealHighlighter {
+                conceal: vec![0..2],
+                scaled_line_start: Some(15),
+            }) as Box<dyn crate::input::InputHighlighter>)
+        });
+        cx.update(|_, cx| {
+            input.update(cx, |state, cx| {
+                state.set_highlighter_factory(factory, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        cx.update(|_, cx| {
+            input.read_with(cx, |state, _| {
+                let x_of = |offset: usize| -> f32 {
+                    let (_, _, pos) = state.line_and_position_for_offset(offset);
+                    pos.expect("offset should be laid out").x.into()
+                };
+                let close = |a: f32, b: f32| (a - b).abs() < 0.01;
+
+                // Control line "body": one glyph per byte.
+                let line1_start = x_of(10);
+                let glyph_w = x_of(11) - line1_start;
+                assert!(glyph_w > 0., "glyph width must be positive: {glyph_w}");
+                assert!(close(x_of(14) - line1_start, 4. * glyph_w));
+
+                // Concealed line: "# " is hidden, so the caret after "# H"
+                // (raw offset 3) sits one glyph in, i.e. moved left by the
+                // width of the two concealed glyphs.
+                let line0_start = x_of(0);
+                assert!(close(line0_start, line1_start), "lines start at the same x");
+                assert!(
+                    close(x_of(3) - line0_start, glyph_w),
+                    "offset 3: {} vs {}",
+                    x_of(3) - line0_start,
+                    glyph_w
+                );
+                // Offsets inside the hidden range collapse to its start.
+                assert!(close(x_of(1), line0_start));
+                assert!(close(x_of(2), line0_start));
+                // End of the line: 7 visible glyphs ("Heading").
+                assert!(close(x_of(9) - line0_start, 7. * glyph_w));
+
+                // Scaled line: glyphs are 1.5x wider.
+                let line2_start = x_of(15);
+                assert!(
+                    close(x_of(16) - line2_start, 1.5 * glyph_w),
+                    "scaled glyph: {} vs {}",
+                    x_of(16) - line2_start,
+                    1.5 * glyph_w
+                );
+                assert!(close(x_of(18) - line2_start, 3. * 1.5 * glyph_w));
+
+                // Clicking maps display x back to raw (buffer) offsets.
+                let last_layout = state.last_layout.as_ref().expect("layout");
+                let bounds = state.last_bounds.expect("bounds");
+                let line_height = last_layout.line_height;
+                let lnw = last_layout.line_number_width;
+                let click = |x: f32, row: f32| -> usize {
+                    state.index_for_mouse_position(
+                        bounds.origin + point(lnw + px(x), line_height * (row + 0.5)),
+                    )
+                };
+                // Line 0: before the hidden "# " -> 0; between "H" and "e" -> 3;
+                // between "e" and "a" -> 4; far right -> end of line (9).
+                assert_eq!(click(0.5, 0.), 0);
+                assert_eq!(click(glyph_w + 0.5, 0.), 3);
+                assert_eq!(click(2. * glyph_w + 0.5, 0.), 4);
+                assert_eq!(click(100. * glyph_w, 0.), 9);
+                // Line 1 is unaffected.
+                assert_eq!(click(glyph_w + 0.5, 1.), 11);
+                // Line 2: scaled glyphs are wider, so the second boundary is
+                // at 1.5 glyph widths.
+                assert_eq!(click(1.5 * glyph_w + 0.5, 2.), 16);
+            });
+        });
     }
 }
 
