@@ -151,7 +151,7 @@ impl<'a> sum_tree::Dimension<'a, LineSummary> for WrapRows {
 
 /// Height multiplier for the line covering a byte range, supplied by the
 /// application (see `InputHighlighter::line_font_scale`).
-pub(crate) type LineHeightScale = Rc<dyn Fn(&Range<usize>) -> f32>;
+pub type LineHeightScale = Rc<dyn Fn(&Range<usize>) -> f32>;
 
 /// Keeps a scale usable as a height: finite, positive, and not so large that a
 /// single line could dominate the document. A hostile or buggy value would
@@ -1824,7 +1824,11 @@ mod tests {
 
         assert!(wrapper.is_uniform_height());
         assert_eq!(wrapper.line_top(2), 2.0);
-        assert_eq!(wrapper.total_height(), 4.0, "three lines and the empty last");
+        assert_eq!(
+            wrapper.total_height(),
+            4.0,
+            "three lines and the empty last"
+        );
         assert_eq!(wrapper.line_at_height(2.5), (2, 0.5));
     }
 
@@ -1876,7 +1880,8 @@ mod tests {
             // And the point just inside the row maps back to it.
             let (found, _) = wrapper.line_at_height(running + 0.01);
             assert_eq!(found, row, "seek into row {row}");
-            running += wrapper.line_height_scale(row) * wrapper.line(row).unwrap().lines_len() as f32;
+            running +=
+                wrapper.line_height_scale(row) * wrapper.line(row).unwrap().lines_len() as f32;
         }
         assert_eq!(wrapper.total_height(), running);
     }
@@ -1911,7 +1916,11 @@ mod tests {
         for bad in [f32::NAN, f32::INFINITY, -1.0, 0.0] {
             assert_eq!(normalize_scale(bad), 1.0, "{bad} should fall back");
         }
-        assert_eq!(normalize_scale(1e9), MAX_HEIGHT_SCALE, "clamped, not summed");
+        assert_eq!(
+            normalize_scale(1e9),
+            MAX_HEIGHT_SCALE,
+            "clamped, not summed"
+        );
         assert_eq!(normalize_scale(2.5), 2.5, "an ordinary scale is kept");
     }
 }

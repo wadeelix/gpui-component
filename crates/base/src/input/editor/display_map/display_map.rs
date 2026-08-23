@@ -11,7 +11,7 @@ use ropey::Rope;
 
 use super::fold_map::FoldMap;
 use super::folding::FoldRange;
-pub use super::text_wrapper::WrappingIndent;
+pub use super::text_wrapper::{LineHeightScale, WrappingIndent};
 use super::text_wrapper::{LineItem, WrapDisplayPoint};
 use super::wrap_map::WrapMap;
 use super::{BufferPoint, DisplayPoint};
@@ -108,6 +108,102 @@ impl DisplayMap {
         } else {
             None // Completely folded
         }
+    }
+
+    /// Installs the per-line height multiplier; `None` restores uniform rows.
+    pub fn set_height_scale(&mut self, scale: Option<LineHeightScale>, cx: &mut App) {
+        self.wrap_map.set_height_scale(scale, cx);
+    }
+
+    /// Whether every display row is one base line height tall.
+    #[inline]
+    pub fn is_uniform_height(&self) -> bool {
+        self.wrap_map.wrapper().is_uniform_height()
+    }
+
+    /// Height of the visible document, in base line heights.
+    ///
+    /// Folded lines are subtracted: their rows are in the tree but not on the
+    /// screen, so a scrollbar built from the raw total would be too long.
+    pub fn total_height(&self) -> f32 {
+        let wrapper = self.wrap_map.wrapper();
+        if self.is_uniform_height() {
+            return self.display_row_count() as f32;
+        }
+        let mut total = wrapper.total_height();
+        for line in self.folded_line_range() {
+            // Not `buffer_line_height`: that already reports 0 for a hidden
+            // line, so subtracting it would subtract nothing. The height being
+            // removed is the one the line has in the tree.
+            total -= self.raw_line_height(line);
+        }
+        total
+    }
+
+    /// Height a buffer line occupies in the tree, whether or not it is drawn.
+    fn raw_line_height(&self, line: usize) -> f32 {
+        let wrapper = self.wrap_map.wrapper();
+        wrapper.line_height_scale(line)
+            * wrapper.line(line).map(|l| l.lines_len()).unwrap_or(0) as f32
+    }
+
+    /// Height of one buffer line's visible rows, in base line heights. A folded
+    /// line has no height, since none of its rows are drawn.
+    pub fn buffer_line_height(&self, line: usize) -> f32 {
+        if self.is_buffer_line_hidden(line) {
+            return 0.;
+        }
+        let wrapper = self.wrap_map.wrapper();
+        let scale = wrapper.line_height_scale(line);
+        scale * self.visible_wrap_row_count_for_buffer_line(line) as f32
+    }
+
+    /// y of the top of a buffer line, in base line heights, with folded lines
+    /// above it contributing nothing.
+    pub fn buffer_line_top(&self, line: usize) -> f32 {
+        if self.is_uniform_height() {
+            return self.buffer_line_to_display_row(line) as f32;
+        }
+        let wrapper = self.wrap_map.wrapper();
+        let mut top = wrapper.line_top(line);
+        for folded in self.folded_line_range() {
+            if folded < line {
+                top -= self.raw_line_height(folded);
+            }
+        }
+        top
+    }
+
+    /// The buffer line drawn at `height` (in base line heights).
+    pub fn buffer_line_at_height(&self, height: f32) -> usize {
+        if self.is_uniform_height() {
+            let display_row = height.max(0.) as usize;
+            return self.display_row_to_buffer_line(display_row);
+        }
+        // Folds shift everything below them up, so walking is only correct
+        // against tops that already account for them.
+        let count = self.buffer_line_count();
+        let mut line = self.wrap_map.wrapper().line_at_height(height.max(0.)).0;
+        line = line.min(count.saturating_sub(1));
+        while line + 1 < count && self.buffer_line_top(line + 1) <= height {
+            line += 1;
+        }
+        while line > 0 && self.buffer_line_top(line) > height {
+            line -= 1;
+        }
+        line
+    }
+
+    /// Buffer lines currently hidden inside a fold.
+    ///
+    /// A fold keeps both its first and last line on screen and hides what is
+    /// between them, so this is `start + 1 ..= end - 1` — not the whole range.
+    /// Counting the last line as hidden would subtract a height that is still
+    /// being drawn.
+    fn folded_line_range(&self) -> impl Iterator<Item = usize> + '_ {
+        self.folded_ranges()
+            .iter()
+            .flat_map(|range| (range.start_line + 1)..range.end_line)
     }
 
     /// Check if a buffer line is completely hidden
@@ -348,5 +444,117 @@ impl DisplayMap {
     #[inline]
     pub fn buffer_line_count(&self) -> usize {
         self.wrap_map.buffer_line_count()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{FontFeatures, FontStyle, FontWeight, TestAppContext, px};
+    use std::rc::Rc;
+
+    /// A map over `text` whose lines starting with `#` are twice as tall.
+    fn map_with_headings(text: &Rope, cx: &mut App) -> DisplayMap {
+        let font = Font {
+            family: "Arial".into(),
+            weight: FontWeight::default(),
+            style: FontStyle::Normal,
+            features: FontFeatures::default(),
+            fallbacks: None,
+        };
+        let mut map = DisplayMap::new(font, px(14.), None);
+        map.set_text(text, cx);
+        let source = text.clone();
+        map.set_height_scale(
+            Some(Rc::new(move |range: &Range<usize>| {
+                if range.end > source.len() {
+                    return 1.0;
+                }
+                match source.slice(range.clone()).chars().next() {
+                    Some('#') => 2.0,
+                    _ => 1.0,
+                }
+            })),
+            cx,
+        );
+        map
+    }
+
+    #[gpui::test]
+    fn heights_stack_up_across_the_document(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let text = Rope::from("plain\n# heading\nplain\n");
+            let map = map_with_headings(&text, cx);
+
+            assert!(!map.is_uniform_height());
+            assert_eq!(map.buffer_line_top(0), 0.);
+            assert_eq!(map.buffer_line_top(1), 1.);
+            assert_eq!(map.buffer_line_top(2), 3., "below the double-height line");
+            assert_eq!(map.buffer_line_height(1), 2.);
+            assert_eq!(map.total_height(), 5.);
+        });
+    }
+
+    #[gpui::test]
+    fn a_point_finds_the_line_drawn_at_it(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let text = Rope::from("plain\n# heading\nplain\n");
+            let map = map_with_headings(&text, cx);
+            // Tops are 0, 1, 3; the heading occupies 1..3.
+            for (height, expected) in [(0., 0), (0.9, 0), (1., 1), (2.9, 1), (3., 2)] {
+                assert_eq!(map.buffer_line_at_height(height), expected, "at {height}");
+            }
+        });
+    }
+
+    /// A fold hides rows that still exist in the tree. If their heights were
+    /// left in, everything below a folded heading would be drawn too low and
+    /// the scrollbar would run past the end of the document.
+    #[gpui::test]
+    fn a_folded_line_takes_its_height_with_it(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let text = Rope::from("# section\n# inner\nbody\ntail\n");
+            let mut map = map_with_headings(&text, cx);
+            // Four lines plus the empty one after the trailing newline:
+            // 2 + 2 + 1 + 1 + 1.
+            let unfolded_total = map.total_height();
+            assert_eq!(unfolded_total, 7.);
+
+            map.set_fold_candidates(vec![FoldRange {
+                start_line: 0,
+                end_line: 2,
+            }]);
+            map.set_folded(0, true);
+            assert_eq!(map.folded_ranges().len(), 1, "the fold was applied");
+
+            // A fold keeps its first and last line visible, so only line 1
+            // (the inner heading, 2 high) is hidden.
+            assert_eq!(map.buffer_line_height(1), 0., "a folded line draws nothing");
+            assert_eq!(map.buffer_line_height(2), 1., "the fold's last line stays");
+            assert_eq!(map.total_height(), unfolded_total - 2.);
+            // Line 2 moves up by exactly what was hidden above it.
+            assert_eq!(map.buffer_line_top(2), 2.);
+            assert_eq!(map.buffer_line_at_height(2.), 2);
+        });
+    }
+
+    #[gpui::test]
+    fn without_a_scale_every_row_stays_one_high(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let font = Font {
+                family: "Arial".into(),
+                weight: FontWeight::default(),
+                style: FontStyle::Normal,
+                features: FontFeatures::default(),
+                fallbacks: None,
+            };
+            let mut map = DisplayMap::new(font, px(14.), None);
+            map.set_text(&Rope::from("# one\ntwo\nthree\n"), cx);
+
+            assert!(map.is_uniform_height());
+            assert_eq!(map.buffer_line_top(2), 2.);
+            assert_eq!(map.buffer_line_height(0), 1., "a heading is not special");
+            assert_eq!(map.buffer_line_at_height(2.5), 2);
+        });
     }
 }

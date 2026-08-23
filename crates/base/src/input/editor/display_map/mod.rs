@@ -14,7 +14,7 @@ mod text_wrapper;
 mod wrap_map;
 
 // Re-export public API
-pub use self::display_map::{DisplayMap, WrappingIndent};
+pub use self::display_map::{DisplayMap, LineHeightScale, WrappingIndent};
 pub(crate) use self::text_wrapper::{LineLayout, normalize_concealed};
 
 // Re-export FoldRange and extract_fold_ranges

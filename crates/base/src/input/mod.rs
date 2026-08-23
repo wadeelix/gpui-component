@@ -69,7 +69,9 @@ pub use diagnostics::{
     Diagnostic, DiagnosticEntry, DiagnosticRelatedInformation, DiagnosticSet, DiagnosticSeverity,
     DiagnosticSummary, DiagnosticTag, RelatedInformation,
 };
-pub use display_map::{BufferPoint, DisplayMap, DisplayPoint, FoldRange, WrappingIndent};
+pub use display_map::{
+    BufferPoint, DisplayMap, DisplayPoint, FoldRange, LineHeightScale, WrappingIndent,
+};
 pub use editor::{Editor, EditorState};
 pub use highlighting::{
     DiagnosticColors, FoldIconRenderer, HighlightStyleResolver, InputEditorStyle, InputHighlighter,

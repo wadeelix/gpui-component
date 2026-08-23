@@ -90,6 +90,14 @@ impl WrapMap {
     }
 
     /// Get the first wrap row for a given buffer line
+    pub(super) fn set_height_scale(
+        &mut self,
+        scale: Option<super::text_wrapper::LineHeightScale>,
+        cx: &mut App,
+    ) {
+        self.wrapper.set_height_scale(scale, cx);
+    }
+
     pub(super) fn buffer_line_to_first_wrap_row(&self, line: usize) -> usize {
         self.wrapper.buffer_line_to_first_wrap_row(line)
     }
