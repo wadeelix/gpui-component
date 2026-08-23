@@ -1,6 +1,7 @@
 use gpui::Half;
 use std::borrow::Cow;
 use std::ops::Range;
+use std::rc::Rc;
 
 use gpui::{
     App, Font, LineFragment, Pixels, Point, ShapedLine, Size, TextAlign, Window, point, px, size,
@@ -38,6 +39,11 @@ pub(crate) struct LineItem {
     ///
     /// Not contains the line end `\n`.
     pub(crate) wrapped_lines: SmallVec<[Range<usize>; 1]>,
+    /// Height of one wrap row of this line, as a multiple of the editor's base
+    /// line height — `1.0` for ordinary text, more for a line the application
+    /// draws larger (an ATX heading). Every wrap row of a line is equally
+    /// tall, so the line's own height is `scale * lines_len()`.
+    pub(crate) height_scale: f32,
 }
 
 impl LineItem {
@@ -65,6 +71,10 @@ pub(crate) struct LineSummary {
     bytes: usize,
     /// Byte length of the longest line in this subtree.
     max_line_len: usize,
+    /// Total height of this subtree in base line heights: the sum over lines of
+    /// `height_scale * wrap rows`. Summing a `f32` down the tree is why this is
+    /// a dimension rather than something recomputed per frame.
+    height: f32,
     /// Buffer row (relative to this subtree) of the first line achieving `max_line_len`.
     longest_row: usize,
 }
@@ -79,6 +89,7 @@ impl sum_tree::Summary for LineSummary {
             bytes: 0,
             max_line_len: 0,
             longest_row: 0,
+            height: 0.,
         }
     }
 
@@ -91,6 +102,7 @@ impl sum_tree::Summary for LineSummary {
         self.buffer_rows += other.buffer_rows;
         self.wrap_rows += other.wrap_rows;
         self.bytes += other.bytes;
+        self.height += other.height;
     }
 }
 
@@ -104,6 +116,7 @@ impl sum_tree::Item for LineItem {
             bytes: self.len(),
             max_line_len: self.len(),
             longest_row: 0,
+            height: self.height_scale * self.lines_len() as f32,
         }
     }
 }
@@ -136,6 +149,56 @@ impl<'a> sum_tree::Dimension<'a, LineSummary> for WrapRows {
     }
 }
 
+/// Height multiplier for the line covering a byte range, supplied by the
+/// application (see `InputHighlighter::line_font_scale`).
+pub(crate) type LineHeightScale = Rc<dyn Fn(&Range<usize>) -> f32>;
+
+/// Keeps a scale usable as a height: finite, positive, and not so large that a
+/// single line could dominate the document. A hostile or buggy value would
+/// otherwise poison every sum in the tree.
+fn normalize_scale(scale: f32) -> f32 {
+    if scale.is_finite() && scale > 0. {
+        scale.min(MAX_HEIGHT_SCALE)
+    } else {
+        1.0
+    }
+}
+
+/// Ceiling for one line's height, in base line heights.
+const MAX_HEIGHT_SCALE: f32 = 8.0;
+
+/// Cursor dimension accumulating height, in base line heights.
+///
+/// `Ord` is what a `SumTree` seek needs, and heights are finite and
+/// non-negative by construction, so the total order is well defined.
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub(crate) struct Height(pub f32);
+
+impl Eq for Height {}
+
+#[allow(clippy::derive_ord_xor_partial_ord)]
+impl Ord for Height {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.partial_cmp(other).unwrap_or(std::cmp::Ordering::Equal)
+    }
+}
+
+impl PartialOrd for Height {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.0.partial_cmp(&other.0)
+    }
+}
+
+impl<'a> sum_tree::Dimension<'a, LineSummary> for Height {
+    fn zero(_: &()) -> Self {
+        Height(0.)
+    }
+
+    fn add_summary(&mut self, summary: &'a LineSummary, _: &()) {
+        self.0 += summary.height;
+    }
+}
+
 /// Used to prepare the text with soft wrap to be get lines to displayed in the Editor.
 ///
 /// After use lines to calculate the scroll size of the Editor.
@@ -146,6 +209,9 @@ pub(crate) struct TextWrapper {
     /// If is none, it means the text is not wrapped
     wrap_width: Option<Pixels>,
     wrapping_indent: WrappingIndent,
+    /// Per-line height multiplier, supplied by the application. `None` keeps
+    /// every line at the base height, which is the uniform behaviour.
+    height_scale: Option<LineHeightScale>,
     /// The lines by split \n
     pub(crate) lines: SumTree<LineItem>,
 
@@ -161,6 +227,7 @@ impl TextWrapper {
             font_size,
             wrap_width,
             wrapping_indent: WrappingIndent::default(),
+            height_scale: None,
             lines: SumTree::new(&()),
             _initialized: false,
         }
@@ -252,6 +319,61 @@ impl TextWrapper {
 
         self.wrapping_indent = wrapping_indent;
         self.update_all(&self.text.clone(), cx);
+    }
+
+    /// Installs the per-line height multiplier and rebuilds every line, since
+    /// any of them may now be a different height. Passing `None` returns the
+    /// document to uniform rows.
+    pub(crate) fn set_height_scale(&mut self, scale: Option<LineHeightScale>, cx: &mut App) {
+        self.height_scale = scale;
+        self.update_all(&self.text.clone(), cx);
+    }
+
+    /// Whether every line is one base height tall. The uniform document must
+    /// keep taking the same arithmetic it always did, so callers branch on
+    /// this rather than paying for a tree seek per frame.
+    pub(crate) fn is_uniform_height(&self) -> bool {
+        self.height_scale.is_none()
+    }
+
+    /// Total document height, in base line heights.
+    pub(crate) fn total_height(&self) -> f32 {
+        if self.is_uniform_height() {
+            return self.lines.summary().wrap_rows as f32;
+        }
+        self.lines.summary().height
+    }
+
+    /// Height of one buffer line (all of its wrap rows), in base line heights.
+    pub(crate) fn line_height_scale(&self, row: usize) -> f32 {
+        if self.is_uniform_height() {
+            return 1.0;
+        }
+        self.line(row).map(|line| line.height_scale).unwrap_or(1.0)
+    }
+
+    /// y of the top of buffer line `row`, in base line heights.
+    pub(crate) fn line_top(&self, row: usize) -> f32 {
+        if self.is_uniform_height() {
+            return self.buffer_line_to_first_wrap_row(row) as f32;
+        }
+        let mut cursor = self.lines.cursor::<Dimensions<BufferRows, Height>>(&());
+        cursor.seek(&BufferRows(row), Bias::Right);
+        cursor.start().1.0
+    }
+
+    /// The buffer line whose rows contain `height` (in base line heights), and
+    /// how far into that line the point falls.
+    pub(crate) fn line_at_height(&self, height: f32) -> (usize, f32) {
+        if self.is_uniform_height() {
+            let wrap_row = height.max(0.) as usize;
+            let row = self.wrap_row_to_buffer_line(wrap_row);
+            return (row, height - self.buffer_line_to_first_wrap_row(row) as f32);
+        }
+        let mut cursor = self.lines.cursor::<Dimensions<Height, BufferRows>>(&());
+        cursor.seek(&Height(height.max(0.)), Bias::Right);
+        let row = cursor.start().1.0.min(self.lines_count().saturating_sub(1));
+        (row, height - self.line_top(row))
     }
 
     pub(crate) fn set_font(&mut self, font: Font, font_size: Pixels, cx: &mut App) {
@@ -373,10 +495,25 @@ impl TextWrapper {
                 wrapped_lines.push(prev_boundary_ix..line.len());
             }
 
+            // Asked once per line here, where the line is being (re)built
+            // anyway, rather than per frame: a scroll must not re-ask, and an
+            // edit only rebuilds the rows it touched.
+            // The range is into `changed_text` — the text as it will be after
+            // this update — so the application resolves it against the same
+            // buffer the engine is building, not a stale snapshot.
+            let height_scale = match &self.height_scale {
+                Some(scale) => {
+                    let start = changed_text.line_start_offset(row);
+                    normalize_scale(scale(&(start..start + line.len())))
+                }
+                None => 1.0,
+            };
+
             new_lines.push(LineItem {
                 len: line.len(),
                 indent: indent_chars,
                 wrapped_lines,
+                height_scale,
             });
         }
 
@@ -1141,16 +1278,19 @@ mod tests {
                     len: 2,
                     indent: 0,
                     wrapped_lines: smallvec::smallvec![0..2],
+                    height_scale: 1.0,
                 },
                 LineItem {
                     len: 4,
                     indent: 0,
                     wrapped_lines: smallvec::smallvec![0..2, 2..4],
+                    height_scale: 1.0,
                 },
                 LineItem {
                     len: 1,
                     indent: 0,
                     wrapped_lines: smallvec::smallvec![0..1],
+                    height_scale: 1.0,
                 },
             ],
             &(),
@@ -1278,24 +1418,28 @@ mod tests {
                     len: Rope::from("Hello, 世界!\r").len(),
                     indent: 0,
                     wrapped_lines: smallvec::smallvec![0..15],
+                    height_scale: 1.0,
                 },
                 // range: 16..36
                 LineItem {
                     len: Rope::from("This is second line.\n").len(),
                     indent: 0,
                     wrapped_lines: smallvec::smallvec![0..10, 10..20],
+                    height_scale: 1.0,
                 },
                 // range: 37..56
                 LineItem {
                     len: Rope::from("This is third line.\n").len(),
                     indent: 0,
                     wrapped_lines: smallvec::smallvec![0..9, 9..15, 15..20],
+                    height_scale: 1.0,
                 },
                 // range: 57..79
                 LineItem {
                     len: Rope::from("这里是第 4 行。").len(),
                     indent: 0,
                     wrapped_lines: smallvec::smallvec![0..22],
+                    height_scale: 1.0,
                 },
             ],
             &(),
@@ -1629,5 +1773,145 @@ mod tests {
             layout.index_for_position(point(px(0.), px(25.)), &last_layout),
             None
         );
+    }
+
+    /// Builds a wrapper whose scale is driven by the first character of each
+    /// line, so a test can say "this line is a heading" without a highlighter.
+    /// The scale closure reads through a shared cell so a test can point it at
+    /// the edited text, the way the real caller points it at the live buffer.
+    fn wrapper_with_scales_from(source: &Rc<std::cell::RefCell<Rope>>) -> TextWrapper {
+        let font = gpui::Font {
+            family: "Arial".into(),
+            weight: FontWeight::default(),
+            style: FontStyle::Normal,
+            features: FontFeatures::default(),
+            fallbacks: None,
+        };
+        let mut wrapper = TextWrapper::new(font, px(14.), None);
+        let text = source.borrow().clone();
+        let source = Rc::clone(source);
+        wrapper.height_scale = Some(Rc::new(move |range: &Range<usize>| {
+            let text = source.borrow();
+            if range.end > text.len() {
+                return 1.0;
+            }
+            match text.slice(range.clone()).chars().next() {
+                Some('#') => 2.0,
+                Some('=') => 1.5,
+                _ => 1.0,
+            }
+        }));
+        wrapper._update(&text, &(0..text.len()), &text, &mut |_, _| vec![]);
+        wrapper
+    }
+
+    fn wrapper_with_scales(text: &Rope) -> TextWrapper {
+        wrapper_with_scales_from(&Rc::new(std::cell::RefCell::new(text.clone())))
+    }
+
+    #[test]
+    fn a_document_without_a_scale_reports_uniform_heights() {
+        let font = gpui::Font {
+            family: "Arial".into(),
+            weight: FontWeight::default(),
+            style: FontStyle::Normal,
+            features: FontFeatures::default(),
+            fallbacks: None,
+        };
+        let mut wrapper = TextWrapper::new(font, px(14.), None);
+        let text = Rope::from("one\ntwo\nthree\n");
+        wrapper._update(&text, &(0..text.len()), &text, &mut |_, _| vec![]);
+
+        assert!(wrapper.is_uniform_height());
+        assert_eq!(wrapper.line_top(2), 2.0);
+        assert_eq!(wrapper.total_height(), 4.0, "three lines and the empty last");
+        assert_eq!(wrapper.line_at_height(2.5), (2, 0.5));
+    }
+
+    #[test]
+    fn a_taller_line_pushes_down_everything_after_it() {
+        let text = Rope::from("plain\n# heading\nplain\n");
+        let wrapper = wrapper_with_scales(&text);
+
+        assert!(!wrapper.is_uniform_height());
+        assert_eq!(wrapper.line_height_scale(1), 2.0);
+        assert_eq!(wrapper.line_top(0), 0.0);
+        assert_eq!(wrapper.line_top(1), 1.0);
+        assert_eq!(wrapper.line_top(2), 3.0, "after the double-height line");
+        assert_eq!(wrapper.total_height(), 5.0);
+    }
+
+    /// The seek is the whole reason heights live in the tree: a scroll position
+    /// must land on the row it is actually inside.
+    #[test]
+    fn a_height_maps_back_to_the_line_containing_it() {
+        let text = Rope::from("plain\n# heading\n= sub\nplain\n");
+        let wrapper = wrapper_with_scales(&text);
+        // Tops: 0, 1, 3, 4.5; total 5.5.
+        for (height, expected_row) in [
+            (0.0, 0),
+            (0.9, 0),
+            (1.0, 1),
+            (2.9, 1),
+            (3.0, 2),
+            (4.4, 2),
+            (4.5, 3),
+        ] {
+            let (row, _) = wrapper.line_at_height(height);
+            assert_eq!(row, expected_row, "height {height}");
+        }
+    }
+
+    /// Every line's top must equal the sum of the heights above it. This is the
+    /// invariant a caret and a scrollbar both read, so it is checked at every
+    /// row rather than at a sampled one.
+    #[test]
+    fn tops_are_the_running_sum_of_the_heights_before_them() {
+        let text = Rope::from("a\n# b\nc\n= d\n# e\nf\n");
+        let wrapper = wrapper_with_scales(&text);
+
+        let mut running = 0.0;
+        for row in 0..wrapper.lines_count() {
+            assert_eq!(wrapper.line_top(row), running, "top of row {row}");
+            // And the point just inside the row maps back to it.
+            let (found, _) = wrapper.line_at_height(running + 0.01);
+            assert_eq!(found, row, "seek into row {row}");
+            running += wrapper.line_height_scale(row) * wrapper.line(row).unwrap().lines_len() as f32;
+        }
+        assert_eq!(wrapper.total_height(), running);
+    }
+
+    /// An edit must only rebuild the rows it touched, and the heights of the
+    /// untouched rows must survive it — that is what makes this incremental.
+    #[test]
+    fn an_edit_keeps_the_heights_of_the_lines_it_did_not_touch() {
+        let text = Rope::from("# one\nplain\n# three\n");
+        let source = Rc::new(std::cell::RefCell::new(text.clone()));
+        let mut wrapper = wrapper_with_scales_from(&source);
+        assert_eq!(wrapper.total_height(), 6.0);
+
+        // Rewrite the middle line only; the closure now sees the edited text,
+        // as the real caller's would.
+        let edited = Rope::from("# one\nplain plain\n# three\n");
+        *source.borrow_mut() = edited.clone();
+        let start = text.line_start_offset(1);
+        let end = text.line_end_offset(1);
+        wrapper._update(&edited, &(start..end), &edited, &mut |_, _| vec![]);
+
+        assert_eq!(wrapper.line_height_scale(0), 2.0, "heading above survived");
+        assert_eq!(wrapper.line_height_scale(1), 1.0);
+        assert_eq!(wrapper.line_height_scale(2), 2.0, "heading below survived");
+        assert_eq!(wrapper.line_top(2), 3.0);
+    }
+
+    /// A scale the application computes from a stale or broken state must not
+    /// poison the sums — every seek afterwards would be wrong.
+    #[test]
+    fn an_impossible_scale_is_refused_rather_than_summed() {
+        for bad in [f32::NAN, f32::INFINITY, -1.0, 0.0] {
+            assert_eq!(normalize_scale(bad), 1.0, "{bad} should fall back");
+        }
+        assert_eq!(normalize_scale(1e9), MAX_HEIGHT_SCALE, "clamped, not summed");
+        assert_eq!(normalize_scale(2.5), 2.5, "an ordinary scale is kept");
     }
 }
