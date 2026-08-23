@@ -42,6 +42,11 @@
   (thematic_break)
 ] @punctuation.list_marker
 
+; GFM task list markers: `[ ]` and `[x]`. Captured separately from the bullet
+; so an editor can render them as checkboxes rather than as literal brackets.
+(task_list_marker_unchecked) @punctuation.list_marker.unchecked
+(task_list_marker_checked) @punctuation.list_marker.checked
+
 [
   (block_continuation)
   (block_quote_marker)

@@ -1500,6 +1500,37 @@ console.log(answer);
         }));
     }
 
+    /// GFM task list markers get their own capture so an editor can tell a
+    /// checkbox from the bullet in front of it and render it as one.
+    #[test]
+    #[cfg(feature = "tree-sitter-markdown")]
+    fn test_markdown_task_list_markers_are_captured() {
+        let markdown = "- [ ] todo\n- [x] done\n- plain\n";
+        let rope = Rope::from_str(markdown);
+        let mut highlighter = SyntaxHighlighter::new("markdown");
+        assert!(highlighter.update(None, &rope, None));
+
+        let highlights = highlighter.match_styles(0..markdown.len());
+        let named = |name: &str| -> Vec<Range<usize>> {
+            highlights
+                .iter()
+                .filter(|item| item.name.as_ref() == name)
+                .map(|item| item.range.clone())
+                .collect()
+        };
+
+        let unchecked = named("punctuation.list_marker.unchecked");
+        let checked = named("punctuation.list_marker.checked");
+        assert_eq!(unchecked.len(), 1, "one `[ ]`: {unchecked:?}");
+        assert_eq!(checked.len(), 1, "one `[x]`: {checked:?}");
+        assert_eq!(&markdown[unchecked[0].clone()], "[ ]");
+        assert_eq!(&markdown[checked[0].clone()], "[x]");
+
+        // The bullet stays a plain list marker on every line, including the
+        // one that has no checkbox.
+        assert_eq!(named("punctuation.list_marker").len(), 3);
+    }
+
     #[test]
     #[cfg(feature = "tree-sitter-languages")]
     fn test_markdown_unknown_fence_language_does_not_allocate_layer() {

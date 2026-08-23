@@ -13,7 +13,7 @@ use crate::{
     highlighter::{Language, languages},
 };
 
-pub(super) const HIGHLIGHT_NAMES: [&str; 41] = [
+pub(super) const HIGHLIGHT_NAMES: [&str; 43] = [
     "attribute",
     "boolean",
     "comment",
@@ -40,6 +40,8 @@ pub(super) const HIGHLIGHT_NAMES: [&str; 41] = [
     "punctuation.bracket",
     "punctuation.delimiter",
     "punctuation.list_marker",
+    "punctuation.list_marker.checked",
+    "punctuation.list_marker.unchecked",
     "punctuation.special",
     "string",
     "string.escape",
@@ -142,6 +144,12 @@ pub struct SyntaxColors {
     pub punctuation_delimiter: Option<ThemeStyle>,
     #[serde(rename = "punctuation.list_marker")]
     pub punctuation_list_marker: Option<ThemeStyle>,
+    /// GFM task list markers; fall back to the plain list marker when a theme
+    /// does not style them.
+    #[serde(rename = "punctuation.list_marker.checked")]
+    pub punctuation_list_marker_checked: Option<ThemeStyle>,
+    #[serde(rename = "punctuation.list_marker.unchecked")]
+    pub punctuation_list_marker_unchecked: Option<ThemeStyle>,
     #[serde(rename = "punctuation.special")]
     pub punctuation_special: Option<ThemeStyle>,
     pub string: Option<ThemeStyle>,
@@ -268,6 +276,12 @@ impl SyntaxColors {
             "punctuation.bracket" => self.punctuation_bracket,
             "punctuation.delimiter" => self.punctuation_delimiter,
             "punctuation.list_marker" => self.punctuation_list_marker,
+            "punctuation.list_marker.checked" => self
+                .punctuation_list_marker_checked
+                .or(self.punctuation_list_marker),
+            "punctuation.list_marker.unchecked" => self
+                .punctuation_list_marker_unchecked
+                .or(self.punctuation_list_marker),
             "punctuation.special" => self.punctuation_special,
             "string" => self.string,
             "string.escape" => self.string_escape,
