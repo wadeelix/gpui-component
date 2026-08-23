@@ -493,8 +493,10 @@ impl<M: InputModeKind> TextElement<M> {
         // Resolve a cursor or selection endpoint to a content-space position.
         let visible_buffer_lines = &last_layout.visible_buffer_lines;
         let caret_for = |row: usize, offset: usize, affinity: bool| -> Point<Pixels> {
-            // y of the top of buffer line `row` in content space.
-            let top = line_height * state.display_map.buffer_line_to_display_row(row);
+            // y of the top of buffer line `row` in content space. Goes through
+            // the summed heights so a caret below a heading is not drawn a
+            // heading's worth of pixels too high.
+            let top = line_height * state.display_map.buffer_line_top(row);
             let line_origin = point(px(0.), top);
 
             if let Some(vi) = visible_buffer_lines.iter().position(|&bl| bl == row) {
@@ -579,8 +581,10 @@ impl<M: InputModeKind> TextElement<M> {
                 }
             }
 
-            // cursor bounds
-            let cursor_height = 0.85 * line_height;
+            // cursor bounds. The caret is sized to the row it sits on, so it
+            // grows with a heading instead of staying a body-text sliver.
+            let cursor_row_height = line_height * state.display_map.line_height_scale(cursor_row);
+            let cursor_height = 0.85 * cursor_row_height;
 
             // Match the caret to the deferred scroll target (applied below) that
             // the text paints at; otherwise the caret follows the cursor-scroll
@@ -601,7 +605,7 @@ impl<M: InputModeKind> TextElement<M> {
             Some(Bounds::new(
                 point(
                     cursor_x,
-                    bounds.top() + cursor_pos.y + ((line_height - cursor_height) / 2.),
+                    bounds.top() + cursor_pos.y + ((cursor_row_height - cursor_height) / 2.),
                 ),
                 size(CURSOR_WIDTH, cursor_height),
             ))
@@ -694,18 +698,22 @@ impl<M: InputModeKind> TextElement<M> {
                 // Ensure at least 6px width for the selection for empty lines.
                 end_x = end_x.max(start.x + px(6.));
 
+                // A selection on a taller line must be as tall as that line,
+                // which is exactly the tier-1 limit variable heights remove.
+                let row_height = line.row_height(line_height);
+
                 line_corners.push(Corners {
                     top_left: line_origin + point(start.x, start.y),
                     top_right: line_origin + point(end_x, start.y),
-                    bottom_left: line_origin + point(start.x, start.y + line_height),
-                    bottom_right: line_origin + point(end_x, start.y + line_height),
+                    bottom_left: line_origin + point(start.x, start.y + row_height),
+                    bottom_right: line_origin + point(end_x, start.y + row_height),
                 });
 
                 // wrapped lines
                 for i in 1..=wrapped_lines {
                     let indent = line.wrap_indent;
-                    let start = point(indent, start.y + i as f32 * line_height);
-                    let mut end = point(end.x, end.y + i as f32 * line_height);
+                    let start = point(indent, start.y + row_height * i);
+                    let mut end = point(end.x, end.y + row_height * i);
                     if i < wrapped_lines {
                         end.x = line_size.width;
                     }
@@ -713,8 +721,8 @@ impl<M: InputModeKind> TextElement<M> {
                     line_corners.push(Corners {
                         top_left: line_origin + point(start.x, start.y),
                         top_right: line_origin + point(end.x, start.y),
-                        bottom_left: line_origin + point(start.x, start.y + line_height),
-                        bottom_right: line_origin + point(end.x, start.y + line_height),
+                        bottom_left: line_origin + point(start.x, start.y + row_height),
+                        bottom_right: line_origin + point(end.x, start.y + row_height),
                     });
                 }
             }
@@ -880,7 +888,6 @@ impl<M: InputModeKind> TextElement<M> {
             return (0..1, vec![0], px(0.));
         }
 
-        let total_lines = state.display_map.wrap_row_count();
         let display_count = state.display_map.display_row_count();
         let buffer_line_count = state.display_map.buffer_line_count();
         if display_count == 0 || buffer_line_count == 0 {
@@ -892,33 +899,51 @@ impl<M: InputModeKind> TextElement<M> {
         } else {
             state.scroll_handle.offset().y
         };
+        // Content height in pixels: `total_height` is in base line heights, and
+        // equals the wrap-row count while every row is uniform.
+        let content_height = line_height * state.display_map.total_height();
         scroll_top = clamp_auto_grow_vertical_scroll_offset(
             &state.mode,
             scroll_top,
-            line_height * total_lines,
+            content_height,
             input_height,
         );
 
-        // Display rows are uniformly `line_height` tall, so the visible window maps
-        // directly to a display-row range.
         let viewport_top = (-scroll_top).max(px(0.));
         let viewport_bottom = viewport_top + input_height;
-        let line_height_f = f32::from(line_height);
-        let first_display =
-            ((f32::from(viewport_top) / line_height_f).floor() as usize).min(display_count - 1);
-        let last_display =
-            ((f32::from(viewport_bottom) / line_height_f).ceil() as usize).min(display_count - 1);
 
-        let start_line = state.display_map.display_row_to_buffer_line(first_display);
-        let end_line = state.display_map.display_row_to_buffer_line(last_display);
+        let (start_line, end_line, visible_top) = if state.display_map.is_uniform_height() {
+            // Rows are uniformly `line_height` tall, so the visible window maps
+            // directly to a display-row range.
+            let line_height_f = f32::from(line_height);
+            let first_display =
+                ((f32::from(viewport_top) / line_height_f).floor() as usize).min(display_count - 1);
+            let last_display = ((f32::from(viewport_bottom) / line_height_f).ceil() as usize)
+                .min(display_count - 1);
 
-        // y of the top of the first visible buffer line (in content space).
-        let visible_top = match state
-            .display_map
-            .buffer_line_to_display_row_range(start_line)
-        {
-            Some(range) => line_height * range.start,
-            None => line_height * first_display,
+            let start_line = state.display_map.display_row_to_buffer_line(first_display);
+            let end_line = state.display_map.display_row_to_buffer_line(last_display);
+            // y of the top of the first visible buffer line (in content space).
+            let visible_top = match state
+                .display_map
+                .buffer_line_to_display_row_range(start_line)
+            {
+                Some(range) => line_height * range.start,
+                None => line_height * first_display,
+            };
+            (start_line, end_line, visible_top)
+        } else {
+            // Rows differ in height, so the window is found by seeking the
+            // summed heights instead of dividing by one of them.
+            let top_in_rows = f32::from(viewport_top) / f32::from(line_height);
+            let bottom_in_rows = f32::from(viewport_bottom) / f32::from(line_height);
+            let start_line = state.display_map.buffer_line_at_height(top_in_rows);
+            let end_line = state
+                .display_map
+                .buffer_line_at_height(bottom_in_rows)
+                .max(start_line);
+            let visible_top = line_height * state.display_map.buffer_line_top(start_line);
+            (start_line, end_line, visible_top)
         };
 
         let visible_range = start_line..(end_line + 1 + extra_rows).min(buffer_line_count);
@@ -1175,7 +1200,9 @@ impl<M: InputModeKind> TextElement<M> {
                     });
                 }
 
-                offset_y += line.wrapped_lines.len() * last_layout.line_height;
+                offset_y += line.wrapped_lines.len() as f32
+                    * last_layout.line_height
+                    * state.display_map.line_height_scale(buffer_line);
             }
 
             infos
@@ -1421,6 +1448,7 @@ impl<M: InputModeKind> TextElement<M> {
 
             let line_layout = LineLayout::new()
                 .lines(wrapped_lines)
+                .with_height_scale(state.display_map.line_height_scale(buffer_line))
                 .with_concealed(concealed);
 
             // Use the first visual line's indentation width for continuation lines.

@@ -140,6 +140,13 @@ impl DisplayMap {
         total
     }
 
+    /// How tall each row of a buffer line is drawn, relative to the base line
+    /// height. This is the number the painter must use, so that a line is drawn
+    /// at exactly the height the summed tops assumed for it.
+    pub fn line_height_scale(&self, line: usize) -> f32 {
+        self.wrap_map.wrapper().line_height_scale(line)
+    }
+
     /// Height a buffer line occupies in the tree, whether or not it is drawn.
     fn raw_line_height(&self, line: usize) -> f32 {
         let wrapper = self.wrap_map.wrapper();

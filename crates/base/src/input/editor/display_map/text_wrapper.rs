@@ -657,11 +657,15 @@ pub(crate) struct LineLayout {
     pub(crate) whitespace_indicators: Option<WhitespaceIndicators>,
     /// Whitespace indicators: (line_index, x_position, is_tab)
     pub(crate) whitespace_chars: Vec<(usize, Pixels, bool)>,
+    /// Height of each of this line's rows, as a multiple of the base line
+    /// height. `1.0` unless the application draws this line larger.
+    pub(crate) height_scale: f32,
 }
 
 impl LineLayout {
     pub(crate) fn new() -> Self {
         Self {
+            height_scale: 1.0,
             display_len: 0,
             concealed: Vec::new(),
             longest_width: px(0.),
@@ -739,6 +743,14 @@ impl LineLayout {
     ///
     /// The `wrapped_lines` must have been shaped from the raw text with these
     /// ranges removed; see [`Self::raw_to_display`].
+    /// Sets how tall each of this line's rows is drawn, relative to the base
+    /// line height. Must match the scale the display map summed, or the line
+    /// will be painted at a height the scroll position does not expect.
+    pub(crate) fn with_height_scale(mut self, scale: f32) -> Self {
+        self.height_scale = scale;
+        self
+    }
+
     pub(crate) fn with_concealed(mut self, concealed: Vec<Range<usize>>) -> Self {
         self.concealed = normalize_concealed(concealed);
         self
@@ -815,7 +827,7 @@ impl LineLayout {
             // Always advance by actual line length. The last line gets +1 so the
             // cursor can be placed after the final character.
             acc_len += if is_last { line.len + 1 } else { line.len };
-            offset_y += last_layout.line_height;
+            offset_y += self.row_height(last_layout.line_height);
         }
 
         None
@@ -862,7 +874,7 @@ impl LineLayout {
         let x_offset = last_layout.alignment_offset(self.longest_width);
         for (i, line) in self.wrapped_lines.iter().enumerate() {
             let is_last = i + 1 == self.wrapped_lines.len();
-            let line_bottom = line_top + last_layout.line_height;
+            let line_bottom = line_top + self.row_height(last_layout.line_height);
             if pos.y >= line_top && pos.y < line_bottom {
                 let mut ix = line.closest_index_for_x(pos.x - x_offset - self.line_indent(i));
                 if !is_last && ix == line.text.len() {
@@ -893,7 +905,7 @@ impl LineLayout {
         let mut line_top = px(0.);
         let x_offset = last_layout.alignment_offset(self.longest_width);
         for (i, line) in self.wrapped_lines.iter().enumerate() {
-            let line_bottom = line_top + last_layout.line_height;
+            let line_bottom = line_top + self.row_height(last_layout.line_height);
             if pos.y >= line_top && pos.y < line_bottom {
                 let ix = line.index_for_x(pos.x - x_offset - self.line_indent(i))?;
                 return Some(self.display_to_raw(offset + ix));
@@ -914,7 +926,15 @@ impl LineLayout {
             .map(|(ix, line)| line.width + self.line_indent(ix))
             .max()
             .unwrap_or(self.longest_width);
-        size(width, self.wrapped_lines.len() * line_height)
+        size(
+            width,
+            self.row_height(line_height) * self.wrapped_lines.len(),
+        )
+    }
+
+    /// Height of one of this line's rows.
+    pub(crate) fn row_height(&self, line_height: Pixels) -> Pixels {
+        line_height * self.height_scale
     }
 
     pub(crate) fn paint(
@@ -928,8 +948,8 @@ impl LineLayout {
     ) {
         for (ix, line) in self.wrapped_lines.iter().enumerate() {
             _ = line.paint(
-                pos + point(self.line_indent(ix), ix * line_height),
-                line_height,
+                pos + point(self.line_indent(ix), self.row_height(line_height) * ix),
+                self.row_height(line_height),
                 text_align,
                 align_width,
                 window,
@@ -948,7 +968,7 @@ impl LineLayout {
 
                 let origin = point(
                     pos.x + *x_position + self.line_indent(*line_index),
-                    pos.y + *line_index as f32 * line_height,
+                    pos.y + self.row_height(line_height) * *line_index,
                 );
 
                 _ = invisible.paint(origin, line_height, text_align, align_width, window, cx);
@@ -1394,6 +1414,100 @@ mod tests {
         assert_eq!(
             line_layout.position_for_index(0, &last_layout, false),
             Some(point(px(0.), px(0.)))
+        );
+    }
+
+    fn layout_for(line_height: Pixels) -> LastLayout {
+        LastLayout {
+            visible_range: 0..1,
+            visible_buffer_lines: vec![0],
+            visible_line_byte_offsets: vec![0],
+            visible_top: px(0.),
+            visible_range_offset: 0..0,
+            lines: Rc::new(vec![]),
+            line_height,
+            wrap_width: None,
+            wrapping_indent: WrappingIndent::default(),
+            line_number_width: px(0.),
+            cursor_bounds: None,
+            text_align: TextAlign::Left,
+            content_width: px(0.),
+        }
+    }
+
+    /// A taller line's wrapped rows are spaced by *its* height. Stepping by the
+    /// base height would stack the second row on top of the first.
+    #[test]
+    fn wrapped_rows_of_a_tall_line_are_spaced_by_its_own_height() {
+        let mut line_layout = LineLayout::new().with_height_scale(2.0);
+        line_layout.set_wrapped_lines(smallvec::smallvec![
+            ShapedLine::default().with_len(3),
+            ShapedLine::default().with_len(3),
+        ]);
+        let last_layout = layout_for(px(20.));
+
+        // First row at the top, second a full 40px below, not 20.
+        assert_eq!(
+            line_layout.position_for_index(0, &last_layout, false),
+            Some(point(px(0.), px(0.)))
+        );
+        assert_eq!(
+            line_layout
+                .position_for_index(4, &last_layout, false)
+                .map(|p| p.y),
+            Some(px(40.))
+        );
+        // And the line reports the height those rows actually occupy.
+        assert_eq!(line_layout.size(px(20.)).height, px(80.));
+        assert_eq!(line_layout.row_height(px(20.)), px(40.));
+    }
+
+    /// A click below a tall line's first row must not fall outside the line.
+    /// With the base height the line would be treated as 40px tall while it is
+    /// drawn 80px tall, so clicks in its lower half would hit nothing.
+    #[test]
+    fn a_click_anywhere_in_a_tall_line_stays_inside_it() {
+        let mut line_layout = LineLayout::new().with_height_scale(2.0);
+        line_layout.set_wrapped_lines(smallvec::smallvec![
+            ShapedLine::default().with_len(3),
+            ShapedLine::default().with_len(3),
+        ]);
+        let last_layout = layout_for(px(20.));
+
+        // The line is drawn 0..80; every y inside it resolves.
+        for y in [0., 39., 40., 79.] {
+            assert!(
+                line_layout
+                    .closest_index_for_position(point(px(0.), px(y)), &last_layout)
+                    .is_some(),
+                "y = {y} is inside the line as drawn"
+            );
+        }
+        // Past the bottom of the line there is nothing to hit.
+        assert!(
+            line_layout
+                .closest_index_for_position(point(px(0.), px(80.)), &last_layout)
+                .is_none()
+        );
+    }
+
+    /// An ordinary line must keep taking exactly the geometry it did before.
+    #[test]
+    fn an_unscaled_line_is_unchanged() {
+        let mut line_layout = LineLayout::new();
+        line_layout.set_wrapped_lines(smallvec::smallvec![
+            ShapedLine::default().with_len(3),
+            ShapedLine::default().with_len(3),
+        ]);
+        let last_layout = layout_for(px(20.));
+
+        assert_eq!(line_layout.row_height(px(20.)), px(20.));
+        assert_eq!(line_layout.size(px(20.)).height, px(40.));
+        assert_eq!(
+            line_layout
+                .position_for_index(4, &last_layout, false)
+                .map(|p| p.y),
+            Some(px(20.))
         );
     }
 
