@@ -34,7 +34,8 @@ use crate::actions::{SelectDown, SelectLeft, SelectRight, SelectUp};
 use crate::input::blink_cursor::CURSOR_WIDTH;
 use crate::input::movement::MoveDirection;
 use crate::input::{
-    InputExtras as _, Position, RopeExt as _, Selection, element::RIGHT_MARGIN, layout::LastLayout,
+    InputExtras as _, LineHeightScale, Position, RopeExt as _, Selection, element::RIGHT_MARGIN,
+    layout::LastLayout,
 };
 use crate::{AutoScroll, StepAction};
 
@@ -709,8 +710,42 @@ impl<M: InputModeKind> InputBaseState<M> {
         cx: &mut Context<Self>,
     ) {
         self.mode.set_highlighter_factory(factory);
+        self.sync_height_scale(cx);
         self._pending_update = true;
         cx.notify();
+    }
+
+    /// Recomputes every line's height from the highlighter.
+    ///
+    /// Concealment is asked for per frame, so it follows the caret on its own.
+    /// Heights are cached in the display map instead — that is what makes a
+    /// scroll cheap — so a scale that depends on where the caret is (a live
+    /// preview that shows a heading's markers only on the caret line) must say
+    /// when that dependency changed. Cheap when nothing moved: the tree is
+    /// rebuilt, but callers debounce this to caret *line* changes.
+    pub fn refresh_line_heights(&mut self, cx: &mut Context<Self>) {
+        self.sync_height_scale(cx);
+        cx.notify();
+    }
+
+    /// Points the display map at the highlighter's per-line font scale, so a
+    /// line the application draws larger also *occupies* more room.
+    ///
+    /// The highlighter is shared rather than copied: it is replaced in place
+    /// when the language changes, and a closure holding a snapshot would keep
+    /// scaling by the old one.
+    fn sync_height_scale(&mut self, cx: &mut Context<Self>) {
+        let Some(highlighter) = self.mode.highlighter().cloned() else {
+            return;
+        };
+        let scale: LineHeightScale = Rc::new(move |range: &Range<usize>| {
+            highlighter
+                .borrow()
+                .as_ref()
+                .map(|highlighter| highlighter.line_font_scale(range))
+                .unwrap_or(1.0)
+        });
+        self.display_map.set_height_scale(Some(scale), cx);
     }
 
     /// Install a default adapter without replacing an application-provided one.
