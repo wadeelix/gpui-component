@@ -39,10 +39,17 @@ pub(super) fn list_item_prefix(ix: usize, ordered: bool, depth: usize) -> String
 /// Converts a document image URL into an [`ImageSource`] without granting
 /// implicit filesystem access.
 ///
-/// Document-provided values remain URI-backed, including `file://` and
-/// scheme-less strings.
+/// A real URI (`https:`, `data:`, `file:`) stays URI-backed and is fetched by
+/// the HTTP client. A scheme-less value is *not* a URI, so it is handed to the
+/// application's [`gpui::AssetSource`] instead: an embedding app can then serve
+/// document-relative images from wherever it keeps them, and one that does not
+/// implement it simply gets no image — neither case reaches the network.
 pub(super) fn image_source(url: &SharedUri) -> ImageSource {
-    url.clone().into()
+    // `From<String>` is what draws the line: it keeps a parseable URL as
+    // `Resource::Uri` and turns anything else into `Resource::Embedded`.
+    // Going through `From<SharedUri>` instead would force every value onto
+    // the network path, scheme or not.
+    ImageSource::from(url.as_ref().to_string())
 }
 
 #[cfg(test)]
@@ -65,17 +72,24 @@ mod tests {
                 other => panic!("expected Uri for {url:?}, got {other:?}"),
             }
         }
+        // A value carrying a scheme is fetched as a URI.
+        fn assert_embedded(url: &str) {
+            match source(url) {
+                Resource::Embedded(path) => assert_eq!(path.as_ref(), url),
+                other => panic!("expected Embedded for {url:?}, got {other:?}"),
+            }
+        }
         assert_uri("https://example.com/logo.png");
         assert_uri("http://example.com/logo.png");
         assert_uri("data:image/png;base64,iVBORw0KGgo=");
-
-        assert_uri("website/public/logo.svg");
-        assert_uri("./images/a.png");
-        assert_uri("../images/a.png");
-        assert_uri("/absolute/path/logo.svg");
         assert_uri("file:///absolute/path/logo.svg");
-        assert_uri(r"C:\images\logo.png");
-        assert_uri("docs/a:b.png");
+
+        // Scheme-less values go to the application's asset source instead, so
+        // a document-relative image never becomes a network request.
+        assert_embedded("website/public/logo.svg");
+        assert_embedded("./images/a.png");
+        assert_embedded("../images/a.png");
+        assert_embedded("/absolute/path/logo.svg");
     }
 
     #[test]
