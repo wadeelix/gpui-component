@@ -1687,6 +1687,11 @@ impl<M: InputModeKind> TextElement<M> {
             // A block widget claims this line and the ones its range runs over.
             // It is reported on its first line, so ask only on lines that are
             // not already covered by one.
+            //
+            // The first line may be above the viewport — a table scrolled
+            // half off the top is the ordinary case — so a widget whose range
+            // merely reaches into this line counts too. Its placement is then
+            // this line, which is the first one actually drawn.
             let line_start = last_layout.visible_line_byte_offsets[vi];
             let line_range = line_start..line_start + line_text.len();
             if block_covers_to.is_some_and(|end| line_range.start >= end) {
@@ -1697,7 +1702,7 @@ impl<M: InputModeKind> TextElement<M> {
                 && let Some(widget) = highlighter
                     .block_widgets(&line_range)
                     .into_iter()
-                    .find(|widget| widget.range.start >= line_range.start)
+                    .find(|widget| widget.range.end > line_range.start)
             {
                 block_covers_to = Some(widget.range.end);
                 block_widgets.push(BlockWidgetPlacement {
