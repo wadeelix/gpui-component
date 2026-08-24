@@ -384,6 +384,53 @@ fn empty_bottom_height(
 }
 
 /// Layout information for fold icons.
+/// One prepainted inline widget, ready to paint.
+struct InlineWidgetLayout {
+    element: gpui::AnyElement,
+}
+
+/// Draws one inline widget. A checkbox reports its click by replacing the
+/// marker text, so the document stays the only source of truth (spec §4 I1)
+/// and undo works without the widget knowing anything about history.
+fn render_inline_widget<M: InputModeKind>(
+    widget: &crate::input::InlineWidget,
+    buffer_line: usize,
+    style: &crate::input::InputEditorStyle,
+    state: gpui::WeakEntity<InputBaseState<M>>,
+) -> impl IntoElement {
+    let crate::input::InlineWidgetKind::Checkbox { checked } = widget.kind;
+    let range = widget.range.clone();
+    let (border, fill) = (style.border, style.foreground);
+
+    gpui::div()
+        .id(("inline-checkbox", buffer_line))
+        .cursor_pointer()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            gpui::div()
+                .size(px(13.))
+                .border_1()
+                .rounded(px(3.))
+                .border_color(if checked { fill } else { border })
+                .bg(if checked {
+                    fill
+                } else {
+                    gpui::transparent_black()
+                }),
+        )
+        .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+            cx.stop_propagation();
+            let Some(state) = state.upgrade() else {
+                return;
+            };
+            state.update(cx, |state, cx| {
+                state.toggle_task_marker(range.clone(), checked, window, cx);
+            });
+        })
+}
+
 struct FoldIconLayout {
     /// Hitbox for the line number area (used for hover detection)
     line_number_hitbox: Hitbox,
@@ -1299,6 +1346,71 @@ impl<M: InputModeKind> TextElement<M> {
     /// - Mouse click handling to toggle fold state
     /// - Cursor style changes on hover
     /// - Only show icon on hover or for current line
+    /// Builds the inline widgets for the visible lines, positioned over the
+    /// text they stand for.
+    ///
+    /// Done in prepaint for the same reason the fold icons are: an element
+    /// cannot be created during paint. Each widget is anchored with
+    /// `position_for_index`, so it follows concealment and per-line font size
+    /// without knowing about either.
+    fn layout_inline_widgets(
+        &self,
+        bounds: &Bounds<Pixels>,
+        last_layout: &LastLayout,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Vec<InlineWidgetLayout> {
+        let (masked, scroll_offset, style) = {
+            let state = self.state.read(cx);
+            (
+                state.masked,
+                state.scroll_handle.offset().x,
+                state.editor_style.clone(),
+            )
+        };
+        if masked {
+            return Vec::new();
+        }
+        let line_height = last_layout.line_height;
+        let mut out = Vec::new();
+        let mut offset_y = last_layout.visible_top;
+
+        for (line, &buffer_line) in last_layout
+            .lines
+            .iter()
+            .zip(last_layout.visible_buffer_lines.iter())
+        {
+            let line_origin = point(
+                bounds.origin.x + last_layout.line_number_width + scroll_offset,
+                bounds.origin.y + offset_y,
+            );
+            for widget in &line.widgets {
+                let Some(at) = line.position_for_index(widget.range.start, last_layout, false)
+                else {
+                    continue;
+                };
+                let size = line.row_height(line_height);
+                let widget_bounds = Bounds {
+                    origin: line_origin + at,
+                    size: gpui::size(size, size),
+                };
+                let element =
+                    render_inline_widget(widget, buffer_line, &style, self.state.downgrade());
+                let mut element = element.into_any_element();
+                element.prepaint_as_root(
+                    widget_bounds.origin,
+                    widget_bounds.size.into(),
+                    window,
+                    cx,
+                );
+                out.push(InlineWidgetLayout { element });
+            }
+            offset_y += line.size(line_height).height;
+        }
+
+        out
+    }
+
     fn paint_fold_icons(
         &mut self,
         fold_icon_layout: &mut FoldIconLayout,
@@ -1398,7 +1510,7 @@ impl<M: InputModeKind> TextElement<M> {
 
             // Raw byte ranges (relative to the line start) hidden from display,
             // and the font-size multiplier for this line.
-            let (concealed, line_font_size) = match highlighter {
+            let (concealed, line_font_size, widgets) = match highlighter {
                 Some(highlighter) => {
                     let line_start = last_layout.visible_line_byte_offsets[vi];
                     let line_range = line_start..line_start + line_text.len();
@@ -1410,9 +1522,25 @@ impl<M: InputModeKind> TextElement<M> {
                     } else {
                         font_size
                     };
-                    (concealed, line_font_size)
+                    // Widget ranges are absolute buffer offsets like the
+                    // concealed ones; store them relative to the line so they
+                    // survive the line being re-shaped.
+                    let widgets = highlighter
+                        .inline_widgets(&line_range)
+                        .into_iter()
+                        .filter(|widget| {
+                            widget.range.start >= line_range.start
+                                && widget.range.end <= line_range.end
+                        })
+                        .map(|widget| crate::input::InlineWidget {
+                            range: widget.range.start - line_range.start
+                                ..widget.range.end - line_range.start,
+                            ..widget
+                        })
+                        .collect();
+                    (concealed, line_font_size, widgets)
                 }
-                None => (Vec::new(), font_size),
+                None => (Vec::new(), font_size, Vec::new()),
             };
 
             let mut wrapped_lines: SmallVec<[ShapedLine; 1]> = SmallVec::with_capacity(1);
@@ -1449,6 +1577,7 @@ impl<M: InputModeKind> TextElement<M> {
             let line_layout = LineLayout::new()
                 .lines(wrapped_lines)
                 .with_height_scale(state.display_map.line_height_scale(buffer_line))
+                .with_widgets(widgets)
                 .with_concealed(concealed);
 
             // Use the first visual line's indentation width for continuation lines.
@@ -1642,6 +1771,8 @@ pub(super) struct PrepaintState {
     cursor_scroll_offset: Point<Pixels>,
     /// row index (zero based), no wrap, same line as the cursor.
     current_row: Option<usize>,
+    /// Prepainted inline widgets, drawn over the text they stand for.
+    inline_widgets: Vec<InlineWidgetLayout>,
     selection_path: Option<Path<Pixels>>,
     hover_highlight_path: Option<Path<Pixels>>,
     search_match_paths: Vec<(Path<Pixels>, bool)>,
@@ -2128,10 +2259,12 @@ impl<M: InputModeKind> Element for TextElement<M> {
             )));
         let fold_icon_layout =
             self.layout_fold_icons(original_x, &bounds, &last_layout, window, cx);
+        let inline_widgets = self.layout_inline_widgets(&bounds, &last_layout, window, cx);
 
         PrepaintState {
             bounds,
             last_layout,
+            inline_widgets,
             scroll_size,
             line_numbers,
             cursor_bounds,
@@ -2393,6 +2526,11 @@ impl<M: InputModeKind> Element for TextElement<M> {
                     offset_y += prepaint.ghost_lines_height;
                 }
             }
+        }
+
+        // Inline widgets sit over the text they replace, so they paint after it.
+        for widget in prepaint.inline_widgets.iter_mut() {
+            widget.element.paint(window, cx);
         }
 
         // Paint fold icons (only visible on hover or for current line)

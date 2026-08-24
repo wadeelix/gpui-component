@@ -81,6 +81,41 @@ pub trait InputHighlighter {
         let _ = line_range;
         1.0
     }
+
+    /// Inline widgets to draw over the text of the buffer line covering
+    /// `line_range`, e.g. a checkbox in place of `[ ]`.
+    ///
+    /// Each widget names the raw byte range it stands for. The engine draws it
+    /// at that range's on-screen position and routes clicks to it; the text
+    /// underneath is *not* hidden by this — conceal it from `conceals` if it
+    /// should not show, which also keeps the caret-line rule in one place.
+    ///
+    /// Queried once per visible line on every layout, so an implementation
+    /// should be as cheap as `conceals` is.
+    ///
+    /// Default: no widgets.
+    fn inline_widgets(&self, line_range: &Range<usize>) -> Vec<InlineWidget> {
+        let _ = line_range;
+        Vec::new()
+    }
+}
+
+/// A widget drawn in place of a range of text (see
+/// [`InputHighlighter::inline_widgets`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlineWidget {
+    /// Raw byte range in the buffer that this widget stands for.
+    pub range: Range<usize>,
+    pub kind: InlineWidgetKind,
+}
+
+/// What an [`InlineWidget`] draws. Deliberately a closed set rather than a
+/// callback: the engine has to lay these out during `prepaint`, where an
+/// application-supplied element would have nowhere safe to come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InlineWidgetKind {
+    /// A GFM task checkbox. Clicking it asks the application to toggle.
+    Checkbox { checked: bool },
 }
 
 pub type InputHighlighterFactory = Rc<dyn Fn(&str) -> Option<Box<dyn InputHighlighter>>>;

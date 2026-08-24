@@ -660,12 +660,15 @@ pub(crate) struct LineLayout {
     /// Height of each of this line's rows, as a multiple of the base line
     /// height. `1.0` unless the application draws this line larger.
     pub(crate) height_scale: f32,
+    /// Widgets drawn over this line, with ranges relative to the line start.
+    pub(crate) widgets: Vec<crate::input::InlineWidget>,
 }
 
 impl LineLayout {
     pub(crate) fn new() -> Self {
         Self {
             height_scale: 1.0,
+            widgets: Vec::new(),
             display_len: 0,
             concealed: Vec::new(),
             longest_width: px(0.),
@@ -748,6 +751,12 @@ impl LineLayout {
     /// will be painted at a height the scroll position does not expect.
     pub(crate) fn with_height_scale(mut self, scale: f32) -> Self {
         self.height_scale = scale;
+        self
+    }
+
+    /// Widgets to draw over this line, with ranges relative to its start.
+    pub(crate) fn with_widgets(mut self, widgets: Vec<crate::input::InlineWidget>) -> Self {
+        self.widgets = widgets;
         self
     }
 

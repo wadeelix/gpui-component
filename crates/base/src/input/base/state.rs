@@ -2026,6 +2026,34 @@ impl<M: InputModeKind> InputBaseState<M> {
         );
     }
 
+    /// Flips a GFM task marker, given the raw byte range of its `[ ]`/`[x]`.
+    ///
+    /// The widget reports its click by editing the *text*, so the document
+    /// stays the only source of truth and one click is one undo step. The
+    /// range is re-checked against the text first: it was computed during a
+    /// layout that may be a frame or two old, and an edit since then could
+    /// have moved it.
+    pub fn toggle_task_marker(
+        &mut self,
+        range: Range<usize>,
+        checked: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let replacement = if checked { "[ ]" } else { "[x]" };
+        let current = if checked { "[x]" } else { "[ ]" };
+        if self.text.slice(range.clone()) != current {
+            // The text moved under the widget; do nothing rather than corrupt
+            // whatever is there now.
+            return;
+        }
+        self.with_edits_allowed(|this| {
+            this.undo_manager.pending_intent = Some(EditIntent::Atomic);
+            let range_utf16 = this.range_to_utf16(&range);
+            this.replace_text_in_range_silent(Some(range_utf16), replacement, window, cx);
+        });
+    }
+
     /// Undoes one step, as `Undo` does, for callers that cannot dispatch an
     /// action — a test asserting that an edit is a *single* undo step, which
     /// is otherwise unobservable from outside.
@@ -3227,6 +3255,55 @@ mod tests {
                 f(crate::input::InputState::new(window, cx))
             })
         }
+    }
+
+    /// A checkbox widget reports its click by editing the text, so the
+    /// document stays the only source of truth.
+    #[gpui::test]
+    fn toggling_a_task_marker_edits_the_text(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let input_view = InputView::new(cx);
+        let mut cx = VisualTestContext::from_window(input_view.window_handle.into(), cx);
+        let input = input_view.input;
+
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.set_value("- [ ] milk", window, cx);
+                state.toggle_task_marker(2..5, false, window, cx);
+            })
+        });
+        assert_eq!(input.read_with(&cx, |state, _| state.value()), "- [x] milk");
+
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.toggle_task_marker(2..5, true, window, cx)
+            })
+        });
+        assert_eq!(input.read_with(&cx, |state, _| state.value()), "- [ ] milk");
+    }
+
+    /// The range came from a layout that may be a frame or two old. If the text
+    /// moved under it, editing blind would corrupt whatever is there now — the
+    /// one way a decorative widget could damage a note.
+    #[gpui::test]
+    fn a_stale_task_range_is_refused(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let input_view = InputView::new(cx);
+        let mut cx = VisualTestContext::from_window(input_view.window_handle.into(), cx);
+        let input = input_view.input;
+
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.set_value("some other text here", window, cx);
+                // 2..5 is `me ` now, not a marker.
+                state.toggle_task_marker(2..5, false, window, cx);
+            })
+        });
+        assert_eq!(
+            input.read_with(&cx, |state, _| state.value()),
+            "some other text here",
+            "the text was left alone"
+        );
     }
 
     #[gpui::test]
