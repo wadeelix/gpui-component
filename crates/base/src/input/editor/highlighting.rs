@@ -98,6 +98,19 @@ pub trait InputHighlighter {
         let _ = line_range;
         Vec::new()
     }
+
+    /// Extra height for the buffer line covering `line_range`, as a multiple of
+    /// the base line height, on top of what `line_font_scale` already implies.
+    ///
+    /// This is what a block widget uses to make room for itself: a fenced code
+    /// block's first line can ask for the height of the whole block without its
+    /// *text* growing, which is the part `line_font_scale` cannot express.
+    ///
+    /// Default: `1.0` (the line takes the room its text needs).
+    fn line_height_scale(&self, line_range: &Range<usize>) -> f32 {
+        let _ = line_range;
+        1.0
+    }
 }
 
 /// A widget drawn in place of a range of text (see

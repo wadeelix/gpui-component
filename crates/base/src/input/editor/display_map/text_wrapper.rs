@@ -2034,6 +2034,44 @@ mod tests {
 
     /// A scale the application computes from a stale or broken state must not
     /// poison the sums — every seek afterwards would be wrong.
+    /// A block widget asks for room without its text growing. The height map
+    /// only sees the combined number, so what this pins is that a scale of 3
+    /// makes the row three times as tall whatever produced it — the caller
+    /// multiplies font scale by height scale before handing it over.
+    #[test]
+    fn a_line_can_be_tall_without_its_text_being_large() {
+        let text = Rope::from("block\nplain\n");
+        let source = Rc::new(std::cell::RefCell::new(text.clone()));
+        let font = gpui::Font {
+            family: "Arial".into(),
+            weight: FontWeight::default(),
+            style: FontStyle::Normal,
+            features: FontFeatures::default(),
+            fallbacks: None,
+        };
+        let mut wrapper = TextWrapper::new(font, px(14.), None);
+        let inner = Rc::clone(&source);
+        wrapper.height_scale = Some(Rc::new(move |range: &Range<usize>| {
+            let text = inner.borrow();
+            if range.end > text.len() {
+                return 1.0;
+            }
+            // Stands in for `font_scale * height_scale` where the font scale is
+            // 1.0 — the block-widget case.
+            if text.slice(range.clone()).to_string().starts_with("block") {
+                3.0
+            } else {
+                1.0
+            }
+        }));
+        let text = source.borrow().clone();
+        wrapper._update(&text, &(0..text.len()), &text, &mut |_, _| vec![]);
+
+        assert_eq!(wrapper.line_height_scale(0), 3.0);
+        assert_eq!(wrapper.line_top(1), 3.0, "the next line starts below it");
+        assert_eq!(wrapper.total_height(), 5.0, "3 + 1 + the empty last line");
+    }
+
     #[test]
     fn an_impossible_scale_is_refused_rather_than_summed() {
         for bad in [f32::NAN, f32::INFINITY, -1.0, 0.0] {

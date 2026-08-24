@@ -739,11 +739,16 @@ impl<M: InputModeKind> InputBaseState<M> {
         let Some(highlighter) = self.mode.highlighter().cloned() else {
             return;
         };
+        // A line's height is its font scale times whatever extra room it asks
+        // for. The two are separate because a heading grows its *text*, while
+        // a block widget needs room without the text under it growing at all.
         let scale: LineHeightScale = Rc::new(move |range: &Range<usize>| {
             highlighter
                 .borrow()
                 .as_ref()
-                .map(|highlighter| highlighter.line_font_scale(range))
+                .map(|highlighter| {
+                    highlighter.line_font_scale(range) * highlighter.line_height_scale(range)
+                })
                 .unwrap_or(1.0)
         });
         self.display_map.set_height_scale(Some(scale), cx);
