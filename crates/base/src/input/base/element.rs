@@ -1519,7 +1519,11 @@ impl<M: InputModeKind> TextElement<M> {
                 bounds.origin.x + last_layout.line_number_width + scroll_offset,
                 bounds.origin.y + top,
             );
-            let width = (bounds.size.width - last_layout.line_number_width).max(px(0.));
+            // Stop short of the right edge by the same margin the text keeps:
+            // the scrollbar is drawn over that strip, and a widget running the
+            // full width would sit underneath it.
+            let width =
+                (bounds.size.width - last_layout.line_number_width - RIGHT_MARGIN).max(px(0.));
             let rows_shown = placement.rows_skipped..placement.rows_skipped + placement.line_count;
             let mut element = render_block_widget(
                 &placement.widget,
