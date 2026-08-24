@@ -385,6 +385,13 @@ fn empty_bottom_height(
 
 /// Layout information for fold icons.
 /// One prepainted inline widget, ready to paint.
+/// A block widget and the visible line it starts on, carried from layout to
+/// paint so the widget can be placed at that line's origin.
+struct BlockWidgetPlacement {
+    line_index: usize,
+    widget: crate::input::BlockWidget,
+}
+
 struct InlineWidgetLayout {
     element: gpui::AnyElement,
 }
@@ -1440,7 +1447,7 @@ impl<M: InputModeKind> TextElement<M> {
         bg_segments: &[(Range<usize>, Hsla)],
         whitespace_indicators: Option<WhitespaceIndicators>,
         window: &mut Window,
-    ) -> Vec<LineLayout> {
+    ) -> (Vec<LineLayout>, Vec<BlockWidgetPlacement>) {
         let is_single_line = state.is_single_line();
 
         if is_single_line {
@@ -1454,7 +1461,7 @@ impl<M: InputModeKind> TextElement<M> {
             let line_layout = LineLayout::new()
                 .lines(smallvec::smallvec![shaped_line])
                 .with_whitespaces(whitespace_indicators);
-            return vec![line_layout];
+            return (vec![line_layout], Vec::new());
         }
 
         // Empty to use placeholder, the placeholder is not in the wrapper map.
@@ -1476,10 +1483,18 @@ impl<M: InputModeKind> TextElement<M> {
             let line_layout = LineLayout::new()
                 .lines(placeholder_lines)
                 .with_whitespaces(whitespace_indicators);
-            return vec![line_layout];
+            return (vec![line_layout], Vec::new());
         }
 
         let mut lines = Vec::with_capacity(last_layout.visible_buffer_lines.len());
+        // Block widgets found while walking the visible lines, each with the
+        // index of the line it starts on so painting can place it.
+        let mut block_widgets: Vec<BlockWidgetPlacement> = Vec::new();
+        // Byte offset one past the block widget currently standing in for a run
+        // of lines, if any. Lines that start before it are laid out with no
+        // text: the widget is drawn over them, and their buffer offsets stay
+        // addressable through the usual concealment path.
+        let mut block_covers_to: Option<usize> = None;
         // run_offset tracks position in the runs vec coordinate space (only visible line bytes).
         // This is separate from the visible_text offset because runs from highlight_lines
         // only cover visible (non-folded) lines.
@@ -1543,9 +1558,42 @@ impl<M: InputModeKind> TextElement<M> {
                 None => (Vec::new(), font_size, Vec::new()),
             };
 
+            // A block widget claims this line and the ones its range runs over.
+            // It is reported on its first line, so ask only on lines that are
+            // not already covered by one.
+            let line_start = last_layout.visible_line_byte_offsets[vi];
+            let line_range = line_start..line_start + line_text.len();
+            if block_covers_to.is_some_and(|end| line_range.start >= end) {
+                block_covers_to = None;
+            }
+            if block_covers_to.is_none()
+                && let Some(highlighter) = highlighter
+                && let Some(widget) = highlighter
+                    .block_widgets(&line_range)
+                    .into_iter()
+                    .find(|widget| widget.range.start >= line_range.start)
+            {
+                block_widgets.push(BlockWidgetPlacement {
+                    line_index: vi,
+                    widget,
+                });
+                block_covers_to = block_widgets.last().map(|p| p.widget.range.end);
+            }
+            let covered_by_block = block_covers_to.is_some_and(|end| line_range.end <= end)
+                && block_widgets
+                    .last()
+                    .is_some_and(|placement| placement.line_index != vi);
+
             let mut wrapped_lines: SmallVec<[ShapedLine; 1]> = SmallVec::with_capacity(1);
 
-            for range in &line_item.wrapped_lines {
+            // Lines under a block widget are laid out as empty rows: the widget
+            // draws over them, and shaping text nobody sees would only cost
+            // time on the keystroke path.
+            for range in if covered_by_block {
+                &[][..]
+            } else {
+                &line_item.wrapped_lines[..]
+            } {
                 let line_runs = runs_for_range(runs, run_offset, &range);
                 let line_runs = if bg_segments.is_empty() {
                     line_runs
@@ -1602,7 +1650,7 @@ impl<M: InputModeKind> TextElement<M> {
             run_offset += line_text.len() + 1;
         }
 
-        lines
+        (lines, block_widgets)
     }
 
     /// First usize is the offset of skipped.
@@ -2073,7 +2121,9 @@ impl<M: InputModeKind> Element for TextElement<M> {
         let whitespace_indicators =
             Self::layout_whitespace_indicators(&state, text_size, &text_style, window, cx);
 
-        let lines = Self::layout_lines(
+        // Not painted yet: displacing the lines is one change, drawing over
+        // them is the next.
+        let (lines, _block_widgets) = Self::layout_lines(
             &state,
             &display_text,
             &last_layout,
