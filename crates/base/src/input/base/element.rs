@@ -408,6 +408,7 @@ struct InlineWidgetLayout {
 fn render_block_widget(
     widget: &crate::input::BlockWidget,
     line_index: usize,
+    row_height: Pixels,
     style: &crate::input::InputEditorStyle,
 ) -> impl IntoElement {
     let crate::input::BlockWidgetKind::Table {
@@ -423,10 +424,14 @@ fn render_block_widget(
     };
 
     let cell = |text: &String, column: usize, is_header: bool| {
+        // Only horizontal padding: a row has to be exactly as tall as the
+        // buffer line it stands in for, or the grid outgrows the rows reserved
+        // for it and the prose after the table is drawn over.
         let cell = gpui::div()
             .flex_1()
+            .h(row_height)
             .px(px(6.))
-            .py(px(2.))
+            .overflow_hidden()
             .text_align(align_of(column));
         let cell = if is_header {
             cell.font_weight(gpui::FontWeight::BOLD)
@@ -437,22 +442,29 @@ fn render_block_widget(
     };
 
     let row = |cells: &Vec<String>, is_header: bool| {
-        let mut line = gpui::div().flex().flex_row().w_full();
+        let mut line = gpui::div().flex().flex_row().w_full().h(row_height);
         for (column, text) in cells.iter().enumerate() {
             line = line.child(cell(text, column, is_header));
         }
         line
     };
 
+    // The delimiter row is scaffolding, not data: it is one of the buffer lines
+    // the widget covers, and its row is what the header's rule is drawn in.
     let mut grid = gpui::div()
         .id(("block-table", line_index))
         .flex()
         .flex_col()
         .w_full()
-        .border_1()
-        .rounded(px(4.))
-        .border_color(style.border)
-        .child(row(header, true));
+        .child(row(header, true))
+        .child(
+            gpui::div()
+                .h(row_height)
+                .w_full()
+                .flex()
+                .items_center()
+                .child(gpui::div().h(px(1.)).w_full().bg(style.border)),
+        );
     for cells in rows {
         grid = grid.child(row(cells, false));
     }
@@ -1478,8 +1490,9 @@ impl<M: InputModeKind> TextElement<M> {
                 bounds.origin.y + top,
             );
             let width = (bounds.size.width - last_layout.line_number_width).max(px(0.));
-            let mut element = render_block_widget(&placement.widget, placement.line_index, &style)
-                .into_any_element();
+            let mut element =
+                render_block_widget(&placement.widget, placement.line_index, line_height, &style)
+                    .into_any_element();
             element.prepaint_as_root(origin, gpui::size(width, height).into(), window, cx);
             out.push(InlineWidgetLayout { element });
         }
@@ -1725,9 +1738,25 @@ impl<M: InputModeKind> TextElement<M> {
 
             let mut wrapped_lines: SmallVec<[ShapedLine; 1]> = SmallVec::with_capacity(1);
 
-            // Lines under a block widget are laid out as empty rows: the widget
-            // draws over them, and shaping text nobody sees would only cost
-            // time on the keystroke path.
+            // A line under a block widget keeps its rows but draws no glyphs:
+            // the widget stands in for the text, and shaping what nobody can
+            // see would only cost time on the keystroke path.
+            //
+            // The rows have to stay. Their height is what pushes the text after
+            // the block down past it, and they are what hit-testing searches to
+            // turn a click into a buffer offset — drop them and the following
+            // prose lands on top of the widget while the caret jumps somewhere
+            // else entirely.
+            if covered_by_block {
+                for _ in &line_item.wrapped_lines {
+                    wrapped_lines.push(window.text_system().shape_line(
+                        SharedString::default(),
+                        line_font_size,
+                        &[],
+                        None,
+                    ));
+                }
+            }
             for range in if covered_by_block {
                 &[][..]
             } else {
