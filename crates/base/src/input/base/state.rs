@@ -717,12 +717,13 @@ impl<M: InputModeKind> InputBaseState<M> {
 
     /// Recomputes every line's height from the highlighter.
     ///
-    /// Concealment is asked for per frame, so it follows the caret on its own.
-    /// Heights are cached in the display map instead — that is what makes a
-    /// scroll cheap — so a scale that depends on where the caret is (a live
-    /// preview that shows a heading's markers only on the caret line) must say
-    /// when that dependency changed. Cheap when nothing moved: the tree is
-    /// rebuilt, but callers debounce this to caret *line* changes.
+    /// Heights are cached in the display map — that is what makes scrolling
+    /// cheap — and are only recomputed when the text changes. A highlighter
+    /// whose scale depends on something else (a mode toggle, a setting, a
+    /// selection) must therefore say when that changed; one that depends only
+    /// on the line's own text never needs this.
+    ///
+    /// Rebuilds every row, so it belongs on a state change, not a frame.
     pub fn refresh_line_heights(&mut self, cx: &mut Context<Self>) {
         self.sync_height_scale(cx);
         cx.notify();
