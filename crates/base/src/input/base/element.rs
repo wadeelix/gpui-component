@@ -391,6 +391,9 @@ struct BlockWidgetPlacement {
     line_index: usize,
     /// Visible lines the widget covers, itself included.
     line_count: usize,
+    /// Rows of the widget that sit above the viewport, so a table scrolled
+    /// partly off the top draws from the row it actually resumes at.
+    rows_skipped: usize,
     widget: crate::input::BlockWidget,
 }
 
@@ -408,6 +411,7 @@ struct InlineWidgetLayout {
 fn render_block_widget(
     widget: &crate::input::BlockWidget,
     line_index: usize,
+    rows_shown: Range<usize>,
     row_height: Pixels,
     style: &crate::input::InputEditorStyle,
 ) -> impl IntoElement {
@@ -449,24 +453,36 @@ fn render_block_widget(
         line
     };
 
-    // The delimiter row is scaffolding, not data: it is one of the buffer lines
-    // the widget covers, and its row is what the header's rule is drawn in.
+    // The table's rows in buffer order. The delimiter row is scaffolding rather
+    // than data: it is one of the buffer lines the widget covers, and its row
+    // is where the header's rule is drawn.
+    let rule = || {
+        gpui::div()
+            .h(row_height)
+            .w_full()
+            .flex()
+            .items_center()
+            .child(gpui::div().h(px(1.)).w_full().bg(style.border))
+    };
+
+    // Only the rows the widget was actually given room for. A table scrolled
+    // partly off the top is placed on its first *visible* line and sized to the
+    // rows that remain, so drawing all of them would spill past the box and
+    // over the text below.
     let mut grid = gpui::div()
         .id(("block-table", line_index))
         .flex()
         .flex_col()
-        .w_full()
-        .child(row(header, true))
-        .child(
-            gpui::div()
-                .h(row_height)
-                .w_full()
-                .flex()
-                .items_center()
-                .child(gpui::div().h(px(1.)).w_full().bg(style.border)),
-        );
-    for cells in rows {
-        grid = grid.child(row(cells, false));
+        .w_full();
+    for ix in rows_shown {
+        grid = match ix {
+            0 => grid.child(row(header, true).into_any_element()),
+            1 => grid.child(rule().into_any_element()),
+            _ => match rows.get(ix - 2) {
+                Some(cells) => grid.child(row(cells, false).into_any_element()),
+                None => grid,
+            },
+        };
     }
     grid
 }
@@ -1490,9 +1506,15 @@ impl<M: InputModeKind> TextElement<M> {
                 bounds.origin.y + top,
             );
             let width = (bounds.size.width - last_layout.line_number_width).max(px(0.));
-            let mut element =
-                render_block_widget(&placement.widget, placement.line_index, line_height, &style)
-                    .into_any_element();
+            let rows_shown = placement.rows_skipped..placement.rows_skipped + placement.line_count;
+            let mut element = render_block_widget(
+                &placement.widget,
+                placement.line_index,
+                rows_shown,
+                line_height,
+                &style,
+            )
+            .into_any_element();
             element.prepaint_as_root(origin, gpui::size(width, height).into(), window, cx);
             out.push(InlineWidgetLayout { element });
         }
@@ -1718,10 +1740,19 @@ impl<M: InputModeKind> TextElement<M> {
                     .find(|widget| widget.range.end > line_range.start)
             {
                 block_covers_to = Some(widget.range.end);
+                // How many of the widget's lines are already above this one:
+                // the newlines between where it starts and where drawing
+                // resumes.
+                let rows_skipped = display_text
+                    .slice(widget.range.start..line_range.start.max(widget.range.start))
+                    .chars()
+                    .filter(|c| *c == '\n')
+                    .count();
                 block_widgets.push(BlockWidgetPlacement {
                     line_index: vi,
                     // Grown as the lines it covers are walked.
                     line_count: 1,
+                    rows_skipped,
                     widget,
                 });
             }
