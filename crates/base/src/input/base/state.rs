@@ -2026,6 +2026,13 @@ impl<M: InputModeKind> InputBaseState<M> {
         );
     }
 
+    /// Undoes one step, as `Undo` does, for callers that cannot dispatch an
+    /// action — a test asserting that an edit is a *single* undo step, which
+    /// is otherwise unobservable from outside.
+    pub fn undo_once(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.undo(&Undo, window, cx);
+    }
+
     pub(super) fn undo(&mut self, _: &Undo, window: &mut Window, cx: &mut Context<Self>) {
         self.undo_manager.set_ignoring(true);
         if let Some(changes) = self.undo_manager.undo() {
