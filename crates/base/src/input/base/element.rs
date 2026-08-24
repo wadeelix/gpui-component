@@ -500,24 +500,38 @@ fn render_inline_widget<M: InputModeKind>(
     let range = widget.range.clone();
     let (border, fill) = (style.border, style.foreground);
 
+    // A checked box carries a tick, not just a filled square: filled alone
+    // reads as a blob rather than as a box that has been ticked, and the two
+    // states then differ only by weight.
+    let mut box_ = gpui::div()
+        .size(px(13.))
+        .border_1()
+        .rounded(px(3.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .border_color(if checked { fill } else { border })
+        .bg(if checked {
+            fill
+        } else {
+            gpui::transparent_black()
+        });
+    if checked {
+        box_ = box_.child(
+            gpui::svg()
+                .path("icons/check.svg")
+                .size(px(11.))
+                .text_color(style.background),
+        );
+    }
+
     gpui::div()
         .id(("inline-checkbox", buffer_line))
         .cursor_pointer()
         .flex()
         .items_center()
         .justify_center()
-        .child(
-            gpui::div()
-                .size(px(13.))
-                .border_1()
-                .rounded(px(3.))
-                .border_color(if checked { fill } else { border })
-                .bg(if checked {
-                    fill
-                } else {
-                    gpui::transparent_black()
-                }),
-        )
+        .child(box_)
         .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
             cx.stop_propagation();
             let Some(state) = state.upgrade() else {
