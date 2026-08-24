@@ -1712,11 +1712,14 @@ impl<M: InputModeKind> TextElement<M> {
                     widget,
                 });
             }
-            let covered_by_block = block_covers_to.is_some_and(|end| line_range.end <= end)
-                && block_widgets
-                    .last()
-                    .is_some_and(|placement| placement.line_index != vi);
-            if covered_by_block && let Some(placement) = block_widgets.last_mut() {
+            // Every line the widget covers, its own first one included: the
+            // widget is drawn instead of the text, not over it, so shaping any
+            // of it would leave the source showing through the grid.
+            let covered_by_block = block_covers_to.is_some_and(|end| line_range.end <= end);
+            if covered_by_block
+                && let Some(placement) = block_widgets.last_mut()
+                && placement.line_index != vi
+            {
                 placement.line_count += 1;
             }
 
