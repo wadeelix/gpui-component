@@ -389,11 +389,74 @@ fn empty_bottom_height(
 /// paint so the widget can be placed at that line's origin.
 struct BlockWidgetPlacement {
     line_index: usize,
+    /// Visible lines the widget covers, itself included.
+    line_count: usize,
     widget: crate::input::BlockWidget,
 }
 
 struct InlineWidgetLayout {
     element: gpui::AnyElement,
+}
+
+/// Draws one block widget: a grid standing in for the lines it covers.
+///
+/// The cells are laid out by the same rules the reading view uses — the header
+/// row reads as a label, the body as data, and each column takes the alignment
+/// its delimiter row spelled. Nothing here edits: structural changes to a table
+/// are text-to-text commands in the application, so the document stays the only
+/// source of truth (spec §4 I1).
+fn render_block_widget(
+    widget: &crate::input::BlockWidget,
+    line_index: usize,
+    style: &crate::input::InputEditorStyle,
+) -> impl IntoElement {
+    let crate::input::BlockWidgetKind::Table {
+        header,
+        rows,
+        aligns,
+    } = &widget.kind;
+
+    let align_of = |column: usize| match aligns.get(column).copied().unwrap_or_default() {
+        crate::input::ColumnAlign::Left => TextAlign::Left,
+        crate::input::ColumnAlign::Center => TextAlign::Center,
+        crate::input::ColumnAlign::Right => TextAlign::Right,
+    };
+
+    let cell = |text: &String, column: usize, is_header: bool| {
+        let cell = gpui::div()
+            .flex_1()
+            .px(px(6.))
+            .py(px(2.))
+            .text_align(align_of(column));
+        let cell = if is_header {
+            cell.font_weight(gpui::FontWeight::BOLD)
+        } else {
+            cell
+        };
+        cell.child(SharedString::from(text.clone()))
+    };
+
+    let row = |cells: &Vec<String>, is_header: bool| {
+        let mut line = gpui::div().flex().flex_row().w_full();
+        for (column, text) in cells.iter().enumerate() {
+            line = line.child(cell(text, column, is_header));
+        }
+        line
+    };
+
+    let mut grid = gpui::div()
+        .id(("block-table", line_index))
+        .flex()
+        .flex_col()
+        .w_full()
+        .border_1()
+        .rounded(px(4.))
+        .border_color(style.border)
+        .child(row(header, true));
+    for cells in rows {
+        grid = grid.child(row(cells, false));
+    }
+    grid
 }
 
 /// Draws one inline widget. A checkbox reports its click by replacing the
@@ -1360,6 +1423,69 @@ impl<M: InputModeKind> TextElement<M> {
     /// cannot be created during paint. Each widget is anchored with
     /// `position_for_index`, so it follows concealment and per-line font size
     /// without knowing about either.
+    /// Prepaints each block widget over the rows its lines occupy: full text
+    /// width, starting at the origin of the line it was reported on, as tall as
+    /// the rows the display map reserved for it.
+    fn layout_block_widgets(
+        &self,
+        placements: &[BlockWidgetPlacement],
+        bounds: &Bounds<Pixels>,
+        last_layout: &LastLayout,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Vec<InlineWidgetLayout> {
+        if placements.is_empty() {
+            return Vec::new();
+        }
+        let (masked, scroll_offset, style) = {
+            let state = self.state.read(cx);
+            (
+                state.masked,
+                state.scroll_handle.offset().x,
+                state.editor_style.clone(),
+            )
+        };
+        if masked {
+            return Vec::new();
+        }
+
+        let line_height = last_layout.line_height;
+        // Row offsets of every visible line, so a widget can be placed at the
+        // top of the line it starts on without re-summing the ones above it.
+        let mut offsets = Vec::with_capacity(last_layout.lines.len());
+        let mut offset_y = last_layout.visible_top;
+        for line in last_layout.lines.iter() {
+            offsets.push(offset_y);
+            offset_y += line.size(line_height).height;
+        }
+
+        let mut out = Vec::new();
+        for placement in placements {
+            let Some(&top) = offsets.get(placement.line_index) else {
+                continue;
+            };
+            // The widget owns every row from its first line to the last one its
+            // range covers.
+            let height: Pixels = last_layout
+                .lines
+                .iter()
+                .skip(placement.line_index)
+                .take(placement.line_count)
+                .map(|line| line.size(line_height).height)
+                .sum();
+            let origin = point(
+                bounds.origin.x + last_layout.line_number_width + scroll_offset,
+                bounds.origin.y + top,
+            );
+            let width = (bounds.size.width - last_layout.line_number_width).max(px(0.));
+            let mut element = render_block_widget(&placement.widget, placement.line_index, &style)
+                .into_any_element();
+            element.prepaint_as_root(origin, gpui::size(width, height).into(), window, cx);
+            out.push(InlineWidgetLayout { element });
+        }
+        out
+    }
+
     fn layout_inline_widgets(
         &self,
         bounds: &Bounds<Pixels>,
@@ -1573,16 +1699,21 @@ impl<M: InputModeKind> TextElement<M> {
                     .into_iter()
                     .find(|widget| widget.range.start >= line_range.start)
             {
+                block_covers_to = Some(widget.range.end);
                 block_widgets.push(BlockWidgetPlacement {
                     line_index: vi,
+                    // Grown as the lines it covers are walked.
+                    line_count: 1,
                     widget,
                 });
-                block_covers_to = block_widgets.last().map(|p| p.widget.range.end);
             }
             let covered_by_block = block_covers_to.is_some_and(|end| line_range.end <= end)
                 && block_widgets
                     .last()
                     .is_some_and(|placement| placement.line_index != vi);
+            if covered_by_block && let Some(placement) = block_widgets.last_mut() {
+                placement.line_count += 1;
+            }
 
             let mut wrapped_lines: SmallVec<[ShapedLine; 1]> = SmallVec::with_capacity(1);
 
@@ -1821,6 +1952,8 @@ pub(super) struct PrepaintState {
     current_row: Option<usize>,
     /// Prepainted inline widgets, drawn over the text they stand for.
     inline_widgets: Vec<InlineWidgetLayout>,
+    /// Prepainted block widgets, drawn over the lines they stand for.
+    block_widgets: Vec<InlineWidgetLayout>,
     selection_path: Option<Path<Pixels>>,
     hover_highlight_path: Option<Path<Pixels>>,
     search_match_paths: Vec<(Path<Pixels>, bool)>,
@@ -2121,9 +2254,7 @@ impl<M: InputModeKind> Element for TextElement<M> {
         let whitespace_indicators =
             Self::layout_whitespace_indicators(&state, text_size, &text_style, window, cx);
 
-        // Not painted yet: displacing the lines is one change, drawing over
-        // them is the next.
-        let (lines, _block_widgets) = Self::layout_lines(
+        let (lines, block_placements) = Self::layout_lines(
             &state,
             &display_text,
             &last_layout,
@@ -2310,11 +2441,14 @@ impl<M: InputModeKind> Element for TextElement<M> {
         let fold_icon_layout =
             self.layout_fold_icons(original_x, &bounds, &last_layout, window, cx);
         let inline_widgets = self.layout_inline_widgets(&bounds, &last_layout, window, cx);
+        let block_widgets =
+            self.layout_block_widgets(&block_placements, &bounds, &last_layout, window, cx);
 
         PrepaintState {
             bounds,
             last_layout,
             inline_widgets,
+            block_widgets,
             scroll_size,
             line_numbers,
             cursor_bounds,
@@ -2576,6 +2710,12 @@ impl<M: InputModeKind> Element for TextElement<M> {
                     offset_y += prepaint.ghost_lines_height;
                 }
             }
+        }
+
+        // Block widgets cover whole rows, so they paint before the inline ones
+        // — a checkbox inside a block would otherwise be hidden by its grid.
+        for widget in prepaint.block_widgets.iter_mut() {
+            widget.element.paint(window, cx);
         }
 
         // Inline widgets sit over the text they replace, so they paint after it.
