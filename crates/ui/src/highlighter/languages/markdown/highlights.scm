@@ -55,3 +55,16 @@
 [
   (backslash_escape)
 ] @string.escape
+
+; GFM pipe tables. Captured under their own names rather than the generic
+; punctuation ones: a live preview conceals `punctuation.*` wholesale, and the
+; `|---|` row must stay legible until there is a drawn grid to replace it —
+; hiding the scaffolding before then leaves a table looking broken. The header
+; row is captured apart from the body because it is the one row a reader treats
+; as a label rather than as data.
+(pipe_table_header) @text.title.table
+(pipe_table_delimiter_row) @punctuation.table.delimiter
+[
+  (pipe_table_align_left)
+  (pipe_table_align_right)
+] @punctuation.table.align
