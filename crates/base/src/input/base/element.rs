@@ -853,8 +853,9 @@ impl<M: InputModeKind> TextElement<M> {
 
             // A line concealed past its first byte shapes to nothing, and then it
             // owns no position at all: neither its own ends nor the fallbacks
-            // below resolve. It still occupies a row, so skip it without
-            // breaking the walk -- the lines after it are still in the range.
+            // below resolve. It still occupies a row, and the selection still
+            // copies its bytes -- so fill the whole row rather than leave a gap
+            // that disagrees with what a copy would yield.
             let line_fallback_start = line.position_for_index(0, last_layout, false);
             let line_fallback_end = line.position_for_index(line.len(), last_layout, false);
 
@@ -862,6 +863,13 @@ impl<M: InputModeKind> TextElement<M> {
                 let start = line_cursor_start.or(line_fallback_start);
                 let end = line_cursor_end.or(line_fallback_end);
                 let (Some(start), Some(end)) = (start, end) else {
+                    let row_height = line.row_height(line_height);
+                    line_corners.push(Corners {
+                        top_left: line_origin,
+                        top_right: line_origin + point(last_layout.content_width, px(0.)),
+                        bottom_left: line_origin + point(px(0.), row_height),
+                        bottom_right: line_origin + point(last_layout.content_width, row_height),
+                    });
                     offset_y += line_size.height;
                     continue;
                 };
@@ -3279,8 +3287,8 @@ mod tests {
         let corners = TextElement::<EditorMode>::match_range_corners(0..23, &last_layout)
             .expect("a selection over three lines has geometry");
 
-        // The first and the last prose line both contribute a rectangle: the
-        // concealed row in between neither panics nor ends the walk.
+        // All three rows contribute a rectangle: the concealed one in between
+        // neither panics nor ends the walk.
         let tops: Vec<f32> = corners.iter().map(|c| c.top_left.y.into()).collect();
         assert!(
             tops.iter().any(|y| *y == 0.),
@@ -3290,6 +3298,16 @@ mod tests {
             tops.iter().any(|y| *y >= 40.),
             "the row after the concealed line is missing: {tops:?}"
         );
+
+        // The concealed row is filled edge to edge: a copy takes its bytes, so
+        // the selection must not show a gap where they are.
+        let concealed_row = corners
+            .iter()
+            .find(|c| c.top_left.y == px(20.))
+            .expect("the concealed row contributes a rectangle");
+        assert_eq!(concealed_row.top_left.x, px(0.));
+        assert_eq!(concealed_row.top_right.x, last_layout.content_width);
+        assert_eq!(concealed_row.bottom_left.y, px(40.));
     }
 
     #[test]
