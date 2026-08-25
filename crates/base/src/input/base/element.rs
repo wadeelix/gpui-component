@@ -536,9 +536,6 @@ fn render_inline_widget<M: InputModeKind>(
         .justify_center()
         .child(box_)
         .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
-            if std::env::var_os("WADE_WIDGET_DEBUG").is_some() {
-                eprintln!("widget: checkbox handler fired, checked={checked}");
-            }
             cx.stop_propagation();
             let Some(state) = state.upgrade() else {
                 return;
@@ -1600,12 +1597,6 @@ impl<M: InputModeKind> TextElement<M> {
                     .position_for_index(widget.range.end, last_layout, false)
                     .unwrap_or(at);
                 let width = (end.x - at.x).max(line_height);
-                if std::env::var_os("WADE_WIDGET_DEBUG").is_some() {
-                    eprintln!(
-                        "widget: line {buffer_line} range {:?} at.x={:?} end.x={:?} width={:?}",
-                        widget.range, at.x, end.x, width
-                    );
-                }
                 let widget_bounds = Bounds {
                     origin: line_origin + at,
                     size: gpui::size(width, line.row_height(line_height)),
@@ -1636,13 +1627,6 @@ impl<M: InputModeKind> TextElement<M> {
 
         // Recorded for the container's mouse handler, which runs before these
         // elements can claim an event of their own.
-        if std::env::var_os("WADE_WIDGET_DEBUG").is_some() {
-            eprintln!(
-                "widget: recorded {} hitbox(es) {:?}",
-                hitboxes.len(),
-                hitboxes
-            );
-        }
         *self.state.read(cx).widget_hitboxes.borrow_mut() = hitboxes;
 
         out

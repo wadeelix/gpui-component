@@ -1696,22 +1696,12 @@ impl<M: InputModeKind> InputBaseState<M> {
         cx: &mut Context<Self>,
     ) {
         // A widget drawn over the text owns clicks that land on it.
-        if std::env::var_os("WADE_WIDGET_DEBUG").is_some() {
-            eprintln!(
-                "widget: click at {:?}; hitboxes {:?}",
-                event.position,
-                self.widget_hitboxes.borrow()
-            );
-        }
         if self
             .widget_hitboxes
             .borrow()
             .iter()
             .any(|bounds| bounds.contains(&event.position))
         {
-            if std::env::var_os("WADE_WIDGET_DEBUG").is_some() {
-                eprintln!("widget: click claimed by a widget");
-            }
             return;
         }
 
@@ -2073,22 +2063,23 @@ impl<M: InputModeKind> InputBaseState<M> {
     ) {
         let replacement = if checked { "[ ]" } else { "[x]" };
         let current = if checked { "[x]" } else { "[ ]" };
-        if std::env::var_os("WADE_WIDGET_DEBUG").is_some() {
-            eprintln!(
-                "widget: toggle range {range:?} holds {:?}, expected {current:?}",
-                self.text.slice(range.clone()).to_string()
-            );
-        }
         if self.text.slice(range.clone()) != current {
             // The text moved under the widget; do nothing rather than corrupt
             // whatever is there now.
             return;
         }
+        // Ticking a box is not a request to edit that line: the replacement
+        // moves the cursor to where it wrote, which in a live preview drops
+        // that row back to its raw markup under the reader's pointer. The
+        // selection is put back where it was.
+        let selection = self.selected_range;
         self.with_edits_allowed(|this| {
             this.undo_manager.pending_intent = Some(EditIntent::Atomic);
             let range_utf16 = this.range_to_utf16(&range);
             this.replace_text_in_range_silent(Some(range_utf16), replacement, window, cx);
         });
+        self.selected_range = selection;
+        cx.notify();
     }
 
     /// Undoes one step, as `Undo` does, for callers that cannot dispatch an
