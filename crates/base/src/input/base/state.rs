@@ -1696,12 +1696,22 @@ impl<M: InputModeKind> InputBaseState<M> {
         cx: &mut Context<Self>,
     ) {
         // A widget drawn over the text owns clicks that land on it.
+        if std::env::var_os("WADE_WIDGET_DEBUG").is_some() {
+            eprintln!(
+                "widget: click at {:?}; hitboxes {:?}",
+                event.position,
+                self.widget_hitboxes.borrow()
+            );
+        }
         if self
             .widget_hitboxes
             .borrow()
             .iter()
             .any(|bounds| bounds.contains(&event.position))
         {
+            if std::env::var_os("WADE_WIDGET_DEBUG").is_some() {
+                eprintln!("widget: click claimed by a widget");
+            }
             return;
         }
 

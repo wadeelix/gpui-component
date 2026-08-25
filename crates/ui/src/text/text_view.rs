@@ -382,7 +382,10 @@ impl Element for TextView {
                 // has to be here: a wrapper would deny `size_full` the fixed
                 // height the scroll handle measures against.
                 this.size_full()
-                    .pr(gpui::px(10.))
+                    // Wide enough for the track at its hovered size plus the
+                    // margin it keeps from the edge; 10px left the bar still
+                    // sitting on a full-width table.
+                    .pr(gpui::px(18.))
                     .vertical_scrollbar(&list_state)
             })
             .relative()

@@ -533,6 +533,9 @@ fn render_inline_widget<M: InputModeKind>(
         .justify_center()
         .child(box_)
         .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+            if std::env::var_os("WADE_WIDGET_DEBUG").is_some() {
+                eprintln!("widget: checkbox handler fired, checked={checked}");
+            }
             cx.stop_propagation();
             let Some(state) = state.upgrade() else {
                 return;
@@ -1371,12 +1374,17 @@ impl<M: InputModeKind> TextElement<M> {
         let line_height = last_layout.line_height;
         let line_number_width =
             last_layout.line_number_width - LINE_NUMBER_RIGHT_MARGIN - FOLD_ICON_HITBOX_WIDTH;
-        let icon_relative_pos = point(
-            (FOLD_ICON_HITBOX_WIDTH - FOLD_ICON_WIDTH).half(),
-            (line_height - FOLD_ICON_WIDTH).half(),
-        );
+        let icon_x = (FOLD_ICON_HITBOX_WIDTH - FOLD_ICON_WIDTH).half();
 
         for (ix, info) in fold_infos.iter().enumerate() {
+            // Centre in the row this icon actually sits beside, not in a base
+            // line: a heading's row is taller than the others, and centring
+            // against the base height left its chevron riding above the text.
+            let row_height = last_layout
+                .line(info.buffer_line)
+                .map(|line| line.row_height(line_height))
+                .unwrap_or(line_height);
+            let icon_relative_pos = point(icon_x, (row_height - FOLD_ICON_WIDTH).half());
             // Position fold icon to the right of line numbers.
             // Use origin_x (unscrolled) so icons stay fixed in the gutter during horizontal scroll.
             let fold_icon_bounds = Bounds::new(
@@ -1585,6 +1593,12 @@ impl<M: InputModeKind> TextElement<M> {
                     .position_for_index(widget.range.end, last_layout, false)
                     .unwrap_or(at);
                 let width = (end.x - at.x).max(line_height);
+                if std::env::var_os("WADE_WIDGET_DEBUG").is_some() {
+                    eprintln!(
+                        "widget: line {buffer_line} range {:?} at.x={:?} end.x={:?} width={:?}",
+                        widget.range, at.x, end.x, width
+                    );
+                }
                 let widget_bounds = Bounds {
                     origin: line_origin + at,
                     size: gpui::size(width, line.row_height(line_height)),
@@ -1606,6 +1620,13 @@ impl<M: InputModeKind> TextElement<M> {
 
         // Recorded for the container's mouse handler, which runs before these
         // elements can claim an event of their own.
+        if std::env::var_os("WADE_WIDGET_DEBUG").is_some() {
+            eprintln!(
+                "widget: recorded {} hitbox(es) {:?}",
+                hitboxes.len(),
+                hitboxes
+            );
+        }
         *self.state.read(cx).widget_hitboxes.borrow_mut() = hitboxes;
 
         out
