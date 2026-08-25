@@ -525,9 +525,12 @@ fn render_inline_widget<M: InputModeKind>(
         );
     }
 
+    // Fills the room it was given so the box lands on the text's centre line:
+    // sized to its child instead, it sat at the top of the row.
     gpui::div()
         .id(("inline-checkbox", buffer_line))
         .cursor_pointer()
+        .size_full()
         .flex()
         .items_center()
         .justify_center()
@@ -1487,13 +1490,12 @@ impl<M: InputModeKind> TextElement<M> {
         if placements.is_empty() {
             return Vec::new();
         }
-        let (masked, scroll_offset, style) = {
+        // `bounds` arrives already shifted by the scroll offset — `layout_cursor`
+        // adds it in place — so adding it again put every widget a screenful to
+        // the right of the text it stands for: drawn off-target, unclickable.
+        let (masked, style) = {
             let state = self.state.read(cx);
-            (
-                state.masked,
-                state.scroll_handle.offset().x,
-                state.editor_style.clone(),
-            )
+            (state.masked, state.editor_style.clone())
         };
         if masked {
             return Vec::new();
@@ -1524,7 +1526,7 @@ impl<M: InputModeKind> TextElement<M> {
                 .map(|line| line.size(line_height).height)
                 .sum();
             let origin = point(
-                bounds.origin.x + last_layout.line_number_width + scroll_offset,
+                bounds.origin.x + last_layout.line_number_width,
                 bounds.origin.y + top,
             );
             // Stop short of the right edge by the same margin the text keeps:
@@ -1554,13 +1556,12 @@ impl<M: InputModeKind> TextElement<M> {
         window: &mut Window,
         cx: &mut App,
     ) -> Vec<InlineWidgetLayout> {
-        let (masked, scroll_offset, style) = {
+        // `bounds` arrives already shifted by the scroll offset — `layout_cursor`
+        // adds it in place — so adding it again put every widget a screenful to
+        // the right of the text it stands for: drawn off-target, unclickable.
+        let (masked, style) = {
             let state = self.state.read(cx);
-            (
-                state.masked,
-                state.scroll_handle.offset().x,
-                state.editor_style.clone(),
-            )
+            (state.masked, state.editor_style.clone())
         };
         if masked {
             return Vec::new();
@@ -1576,7 +1577,7 @@ impl<M: InputModeKind> TextElement<M> {
             .zip(last_layout.visible_buffer_lines.iter())
         {
             let line_origin = point(
-                bounds.origin.x + last_layout.line_number_width + scroll_offset,
+                bounds.origin.x + last_layout.line_number_width,
                 bounds.origin.y + offset_y,
             );
             for widget in &line.widgets {
