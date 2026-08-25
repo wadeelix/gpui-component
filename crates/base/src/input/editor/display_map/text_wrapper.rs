@@ -839,6 +839,16 @@ impl LineLayout {
             offset_y += self.row_height(last_layout.line_height);
         }
 
+        // A line concealed past its first byte shapes to nothing, yet `len()`
+        // still counts the hidden bytes, so the translated offset lands beyond
+        // the empty visual line -- which owns only offset 0. Such a line has no
+        // interior to disagree about: every offset in it collapses to one point,
+        // and a selection spanning it still has to be drawn somewhere. Lines
+        // that shaped into real text keep answering `None` past their end.
+        if self.display_len == 0 {
+            return Some(point(x_offset, px(0.)));
+        }
+
         None
     }
 
@@ -1731,6 +1741,45 @@ mod tests {
             line_layout.position_for_index(6, &last_layout, false),
             Some(point(px(20.), px(20.))),
         )
+    }
+
+    /// A line the caller concealed past its first byte shapes to nothing, and
+    /// `len()` then translates to a display offset the empty visual line cannot
+    /// own. Selecting across such a line must not lose its end position.
+    #[test]
+    fn a_line_concealed_past_its_start_still_answers_for_its_end() {
+        let line_layout = LineLayout::new()
+            .lines(smallvec::smallvec![ShapedLine::default().with_len(0)])
+            .with_concealed(vec![1..12]);
+
+        let last_layout = LastLayout {
+            visible_range: 0..1,
+            visible_buffer_lines: vec![0],
+            visible_line_byte_offsets: vec![0],
+            visible_top: px(0.),
+            visible_range_offset: 0..0,
+            lines: Rc::new(vec![]),
+            line_height: px(20.0),
+            wrap_width: None,
+            wrapping_indent: WrappingIndent::Same,
+            line_number_width: px(0.),
+            cursor_bounds: None,
+            text_align: TextAlign::Left,
+            content_width: px(0.),
+        };
+
+        assert_eq!(line_layout.len(), 11);
+        // Both ends of the line resolve, so a selection spanning it can be drawn.
+        assert!(
+            line_layout
+                .position_for_index(0, &last_layout, false)
+                .is_some()
+        );
+        assert!(
+            line_layout
+                .position_for_index(line_layout.len(), &last_layout, false)
+                .is_some()
+        );
     }
 
     #[test]
