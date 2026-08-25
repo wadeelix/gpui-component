@@ -839,16 +839,6 @@ impl LineLayout {
             offset_y += self.row_height(last_layout.line_height);
         }
 
-        // A line concealed past its first byte shapes to nothing, yet `len()`
-        // still counts the hidden bytes, so the translated offset lands beyond
-        // the empty visual line -- which owns only offset 0. Such a line has no
-        // interior to disagree about: every offset in it collapses to one point,
-        // and a selection spanning it still has to be drawn somewhere. Lines
-        // that shaped into real text keep answering `None` past their end.
-        if self.display_len == 0 {
-            return Some(point(x_offset, px(0.)));
-        }
-
         None
     }
 
@@ -1744,10 +1734,10 @@ mod tests {
     }
 
     /// A line the caller concealed past its first byte shapes to nothing, and
-    /// `len()` then translates to a display offset the empty visual line cannot
-    /// own. Selecting across such a line must not lose its end position.
+    /// then owns no position at all -- not even its own ends. Callers must cope
+    /// with `None` rather than unwrap it; `layout_match_range` skips such a row.
     #[test]
-    fn a_line_concealed_past_its_start_still_answers_for_its_end() {
+    fn a_line_concealed_past_its_start_owns_no_position() {
         let line_layout = LineLayout::new()
             .lines(smallvec::smallvec![ShapedLine::default().with_len(0)])
             .with_concealed(vec![1..12]);
@@ -1769,16 +1759,16 @@ mod tests {
         };
 
         assert_eq!(line_layout.len(), 11);
-        // Both ends of the line resolve, so a selection spanning it can be drawn.
+        // Offset 0 is the one the empty visual line owns.
         assert!(
             line_layout
                 .position_for_index(0, &last_layout, false)
                 .is_some()
         );
-        assert!(
-            line_layout
-                .position_for_index(line_layout.len(), &last_layout, false)
-                .is_some()
+        // Its raw end translates past that, so there is no position for it.
+        assert_eq!(
+            line_layout.position_for_index(line_layout.len(), &last_layout, false),
+            None
         );
     }
 

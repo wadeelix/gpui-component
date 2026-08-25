@@ -794,6 +794,19 @@ impl<M: InputModeKind> TextElement<M> {
         last_layout: &LastLayout,
         bounds: &Bounds<Pixels>,
     ) -> Option<Path<Pixels>> {
+        let line_corners = Self::match_range_corners(range, last_layout)?;
+        Self::corners_to_path(line_corners, last_layout.line_number_width, bounds)
+    }
+
+    /// The per-row rectangles a match range covers, top to bottom.
+    ///
+    /// Separate from the path it becomes so the geometry can be asserted on:
+    /// a row the range spans must produce a rectangle even when the rows around
+    /// it are shaped differently.
+    pub(crate) fn match_range_corners(
+        range: Range<usize>,
+        last_layout: &LastLayout,
+    ) -> Option<Vec<Corners<Point<Pixels>>>> {
         if range.is_empty() {
             return None;
         }
@@ -807,7 +820,6 @@ impl<M: InputModeKind> TextElement<M> {
         let line_height = last_layout.line_height;
         let visible_top = last_layout.visible_top;
         let lines = &last_layout.lines;
-        let line_number_width = last_layout.line_number_width;
 
         let start_ix = range.start;
         let end_ix = range.end;
@@ -839,14 +851,20 @@ impl<M: InputModeKind> TextElement<M> {
                 false,
             );
 
-            if line_cursor_start.is_some() || line_cursor_end.is_some() {
-                let start = line_cursor_start
-                    .unwrap_or_else(|| line.position_for_index(0, last_layout, false).unwrap());
+            // A line concealed past its first byte shapes to nothing, and then it
+            // owns no position at all: neither its own ends nor the fallbacks
+            // below resolve. It still occupies a row, so skip it without
+            // breaking the walk -- the lines after it are still in the range.
+            let line_fallback_start = line.position_for_index(0, last_layout, false);
+            let line_fallback_end = line.position_for_index(line.len(), last_layout, false);
 
-                let end = line_cursor_end.unwrap_or_else(|| {
-                    line.position_for_index(line.len(), last_layout, false)
-                        .unwrap()
-                });
+            if line_cursor_start.is_some() || line_cursor_end.is_some() {
+                let start = line_cursor_start.or(line_fallback_start);
+                let end = line_cursor_end.or(line_fallback_end);
+                let (Some(start), Some(end)) = (start, end) else {
+                    offset_y += line_size.height;
+                    continue;
+                };
 
                 // Split the selection into multiple items
                 let wrapped_lines =
@@ -896,13 +914,22 @@ impl<M: InputModeKind> TextElement<M> {
             offset_y += line_size.height;
         }
 
-        let mut points = vec![];
         if line_corners.is_empty() {
             return None;
         }
 
+        Some(line_corners)
+    }
+
+    fn corners_to_path(
+        mut line_corners: Vec<Corners<Point<Pixels>>>,
+        line_number_width: Pixels,
+        bounds: &Bounds<Pixels>,
+    ) -> Option<Path<Pixels>> {
+        let mut points = vec![];
+
         // Fix corners to make sure the left to right direction
-        for corners in &mut line_corners {
+        for corners in line_corners.iter_mut() {
             if corners.top_left.x > corners.top_right.x {
                 std::mem::swap(&mut corners.top_left, &mut corners.top_right);
                 std::mem::swap(&mut corners.bottom_left, &mut corners.bottom_right);
@@ -3212,6 +3239,58 @@ fn split_runs_by_bg_segments(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Selecting across a table crashed, then swallowed the selection: the
+    /// table's source lines conceal past their first byte, so they shape to
+    /// nothing and own no position. Such a row must be skipped without ending
+    /// the walk -- the rows after it are still inside the range.
+    #[test]
+    fn a_selection_spans_the_rows_after_a_line_that_shapes_to_nothing() {
+        use crate::input::EditorMode;
+        use crate::input::WrappingIndent;
+        use gpui::ShapedLine;
+
+        // Three buffer lines: prose, a concealed table row, prose.
+        let prose_a =
+            LineLayout::new().lines(smallvec::smallvec![ShapedLine::default().with_len(5)]);
+        let concealed = LineLayout::new()
+            .lines(smallvec::smallvec![ShapedLine::default().with_len(0)])
+            .with_concealed(vec![1..12]);
+        let prose_b =
+            LineLayout::new().lines(smallvec::smallvec![ShapedLine::default().with_len(5)]);
+
+        let last_layout = LastLayout {
+            visible_range: 0..3,
+            visible_buffer_lines: vec![0, 1, 2],
+            // byte offsets of each line start: 5 + 1, then 11 + 1
+            visible_line_byte_offsets: vec![0, 6, 18],
+            visible_top: px(0.),
+            visible_range_offset: 0..23,
+            lines: Rc::new(vec![prose_a, concealed, prose_b]),
+            line_height: px(20.),
+            wrap_width: None,
+            wrapping_indent: WrappingIndent::None,
+            line_number_width: px(0.),
+            cursor_bounds: None,
+            text_align: TextAlign::Left,
+            content_width: px(200.),
+        };
+
+        let corners = TextElement::<EditorMode>::match_range_corners(0..23, &last_layout)
+            .expect("a selection over three lines has geometry");
+
+        // The first and the last prose line both contribute a rectangle: the
+        // concealed row in between neither panics nor ends the walk.
+        let tops: Vec<f32> = corners.iter().map(|c| c.top_left.y.into()).collect();
+        assert!(
+            tops.iter().any(|y| *y == 0.),
+            "the row before the concealed line is missing: {tops:?}"
+        );
+        assert!(
+            tops.iter().any(|y| *y >= 40.),
+            "the row after the concealed line is missing: {tops:?}"
+        );
+    }
 
     #[test]
     fn test_plain_text_decorations_include_unstyled_gaps() {
