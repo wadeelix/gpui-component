@@ -171,19 +171,8 @@ pub enum BlockWidgetKind {
     /// apart from the body because it is the one row a reader treats as a
     /// label, and the alignments are per column, as the delimiter row spells
     /// them.
-    ///
-    /// `header` is `None` for a widget that stands for part of a table only --
-    /// the rows below a caret being edited in place, which have no header of
-    /// their own and must not borrow the table's. Such a widget draws its rows
-    /// and nothing else, so the grid continues rather than starting again.
-    ///
-    /// `rule` says whether the delimiter row is one of the lines this widget
-    /// covers. It is scaffolding rather than data -- it holds a line and draws
-    /// the rule under the header -- so a widget that covers it must draw one,
-    /// or it claims a row it never fills and the grid slips by a line.
     Table {
-        header: Option<Vec<String>>,
-        rule: bool,
+        header: Vec<String>,
         rows: Vec<Vec<String>>,
         aligns: Vec<ColumnAlign>,
     },
