@@ -765,6 +765,13 @@ impl LineLayout {
         self
     }
 
+    /// Bytes this line actually shaped into glyphs. Zero when the line stands
+    /// in for a block widget, or was concealed away entirely.
+    #[inline]
+    pub(crate) fn display_len(&self) -> usize {
+        self.display_len
+    }
+
     /// Raw bytes length of this line (display length plus concealed bytes).
     #[inline]
     pub(crate) fn len(&self) -> usize {

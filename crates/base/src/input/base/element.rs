@@ -883,8 +883,22 @@ impl<M: InputModeKind> TextElement<M> {
                     end_x = line_wrap_width;
                 }
 
-                // Ensure at least 6px width for the selection for empty lines.
-                end_x = end_x.max(start.x + px(6.));
+                // A line that shaped into no glyphs -- one standing in for a
+                // block widget, or concealed away entirely -- reports the same
+                // position for both of its ends, which would draw a sliver.
+                // Its bytes are still inside the range and a copy still takes
+                // them, so fill the row: the selection is the only feedback
+                // about what a copy will yield.
+                let shapes_to_nothing = line.display_len() == 0;
+                let spans_this_line =
+                    start_ix <= prev_lines_offset && end_ix >= prev_lines_offset + line.len();
+
+                if shapes_to_nothing && spans_this_line {
+                    end_x = last_layout.content_width;
+                } else {
+                    // Ensure at least 6px width for the selection for empty lines.
+                    end_x = end_x.max(start.x + px(6.));
+                }
 
                 // A selection on a taller line must be as tall as that line,
                 // which is exactly the tier-1 limit variable heights remove.
@@ -3308,6 +3322,54 @@ mod tests {
         assert_eq!(concealed_row.top_left.x, px(0.));
         assert_eq!(concealed_row.top_right.x, last_layout.content_width);
         assert_eq!(concealed_row.bottom_left.y, px(40.));
+    }
+
+    /// A line standing in for a block widget shapes to one empty line and
+    /// records no conceal at all, so both of its ends resolve to the same
+    /// point. Left alone that draws a 6px sliver, while a copy takes the whole
+    /// line -- the highlight has to cover what the clipboard will get.
+    #[test]
+    fn a_selection_fills_the_row_of_a_line_drawn_as_a_block_widget() {
+        use crate::input::EditorMode;
+        use crate::input::WrappingIndent;
+        use gpui::ShapedLine;
+
+        // Prose, a row standing in for a table widget, prose.
+        let prose_a =
+            LineLayout::new().lines(smallvec::smallvec![ShapedLine::default().with_len(5)]);
+        let under_widget =
+            LineLayout::new().lines(smallvec::smallvec![ShapedLine::default().with_len(0)]);
+        let prose_b =
+            LineLayout::new().lines(smallvec::smallvec![ShapedLine::default().with_len(5)]);
+
+        let last_layout = LastLayout {
+            visible_range: 0..3,
+            visible_buffer_lines: vec![0, 1, 2],
+            // "prose" (5) + \n, then the widget row (0) + \n
+            visible_line_byte_offsets: vec![0, 6, 7],
+            visible_top: px(0.),
+            visible_range_offset: 0..12,
+            lines: Rc::new(vec![prose_a, under_widget, prose_b]),
+            line_height: px(20.),
+            wrap_width: None,
+            wrapping_indent: WrappingIndent::None,
+            line_number_width: px(0.),
+            cursor_bounds: None,
+            text_align: TextAlign::Left,
+            content_width: px(200.),
+        };
+
+        let corners = TextElement::<EditorMode>::match_range_corners(0..12, &last_layout)
+            .expect("a selection over three lines has geometry");
+
+        let widget_row = corners
+            .iter()
+            .find(|c| c.top_left.y == px(20.))
+            .expect("the widget row contributes a rectangle");
+        assert_eq!(
+            widget_row.top_right.x, last_layout.content_width,
+            "the row is a sliver instead of covering what a copy takes"
+        );
     }
 
     #[test]
