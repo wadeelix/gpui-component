@@ -2798,17 +2798,6 @@ impl<M: InputModeKind> Element for TextElement<M> {
             }
         }
 
-        // Block widgets cover whole rows, so they paint before the inline ones
-        // — a checkbox inside a block would otherwise be hidden by its grid.
-        for widget in prepaint.block_widgets.iter_mut() {
-            widget.element.paint(window, cx);
-        }
-
-        // Inline widgets sit over the text they replace, so they paint after it.
-        for widget in prepaint.inline_widgets.iter_mut() {
-            widget.element.paint(window, cx);
-        }
-
         // Paint fold icons (only visible on hover or for current line)
         self.paint_fold_icons(
             &mut prepaint.fold_icon_layout,
@@ -2854,6 +2843,20 @@ impl<M: InputModeKind> Element for TextElement<M> {
         }
 
         self.paint_mouse_listeners(window, cx);
+
+        // Widgets paint last, after the editor's own mouse listeners, because a
+        // listener registered later is offered the event first: painted before
+        // them, a checkbox was drawn correctly but never saw its click — the
+        // editor took it and moved the caret instead.
+        //
+        // Block widgets still come before the inline ones, so a checkbox inside
+        // a block is not buried under its grid.
+        for widget in prepaint.block_widgets.iter_mut() {
+            widget.element.paint(window, cx);
+        }
+        for widget in prepaint.inline_widgets.iter_mut() {
+            widget.element.paint(window, cx);
+        }
     }
 }
 
