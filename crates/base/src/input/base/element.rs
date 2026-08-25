@@ -1571,11 +1571,17 @@ impl<M: InputModeKind> TextElement<M> {
         let mut hitboxes = Vec::new();
         let mut offset_y = last_layout.visible_top;
 
-        for (line, &buffer_line) in last_layout
+        for (vi, (line, &buffer_line)) in last_layout
             .lines
             .iter()
             .zip(last_layout.visible_buffer_lines.iter())
+            .enumerate()
         {
+            let line_start = last_layout
+                .visible_line_byte_offsets
+                .get(vi)
+                .copied()
+                .unwrap_or(0);
             let line_origin = point(
                 bounds.origin.x + last_layout.line_number_width,
                 bounds.origin.y + offset_y,
@@ -1604,8 +1610,17 @@ impl<M: InputModeKind> TextElement<M> {
                     origin: line_origin + at,
                     size: gpui::size(width, line.row_height(line_height)),
                 };
+                // Back to buffer offsets: the widget was stored relative to
+                // its line so it survives re-shaping, but the toggle edits the
+                // document and re-checks the text at the range it is handed —
+                // given a line-relative one it read the top of the file, found
+                // something that was not a task marker, and refused to edit.
+                let widget = crate::input::InlineWidget {
+                    range: line_start + widget.range.start..line_start + widget.range.end,
+                    ..widget.clone()
+                };
                 let element =
-                    render_inline_widget(widget, buffer_line, &style, self.state.downgrade());
+                    render_inline_widget(&widget, buffer_line, &style, self.state.downgrade());
                 let mut element = element.into_any_element();
                 element.prepaint_as_root(
                     widget_bounds.origin,
