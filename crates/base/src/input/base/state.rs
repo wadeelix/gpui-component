@@ -2073,6 +2073,12 @@ impl<M: InputModeKind> InputBaseState<M> {
     ) {
         let replacement = if checked { "[ ]" } else { "[x]" };
         let current = if checked { "[x]" } else { "[ ]" };
+        if std::env::var_os("WADE_WIDGET_DEBUG").is_some() {
+            eprintln!(
+                "widget: toggle range {range:?} holds {:?}, expected {current:?}",
+                self.text.slice(range.clone()).to_string()
+            );
+        }
         if self.text.slice(range.clone()) != current {
             // The text moved under the widget; do nothing rather than corrupt
             // whatever is there now.
