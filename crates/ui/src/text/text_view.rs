@@ -376,7 +376,14 @@ impl Element for TextView {
             .key_context("TextView")
             .track_focus(&focus_handle)
             .when(self.scrollable, |this| {
-                this.size_full().vertical_scrollbar(&list_state)
+                // The scrollbar is an overlay on this element's own right edge,
+                // so content reaching the full width — a table, a code block —
+                // is drawn under it. The padding is the room it needs, and it
+                // has to be here: a wrapper would deny `size_full` the fixed
+                // height the scroll handle measures against.
+                this.size_full()
+                    .pr(gpui::px(10.))
+                    .vertical_scrollbar(&list_state)
             })
             .relative()
             .on_action(move |_: &crate::input::Copy, window, cx| {

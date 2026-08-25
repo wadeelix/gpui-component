@@ -16,6 +16,11 @@
 ((strong_emphasis) @emphasis.strong
   (#set! highlight.allow-overlap))
 
+; GFM strikethrough. Without this the `~~` melted away and the word was left
+; looking like ordinary prose — the markup gone and nothing standing for it.
+((strikethrough) @strikethrough
+  (#set! highlight.allow-overlap))
+
 [
   (link_destination)
   (uri_autolink)

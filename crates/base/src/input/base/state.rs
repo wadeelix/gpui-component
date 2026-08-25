@@ -13,7 +13,7 @@ use gpui::{
 use ropey::{Rope, RopeSlice};
 use serde::Deserialize;
 use std::borrow::Cow;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::rc::Rc;
 use sum_tree::Bias;
@@ -339,6 +339,11 @@ pub struct InputBaseState<M: InputModeKind> {
     /// The size of the scrollable content.
     pub(crate) scroll_size: gpui::Size<Pixels>,
     pub(super) editor_scrollbar_snapshot: Cell<Option<EditorScrollbarSnapshot>>,
+    /// Screen rectangles of the widgets drawn on the last frame. A click inside
+    /// one belongs to that widget: the editor's own mouse handler sits on the
+    /// container and would otherwise take every click before the widget could,
+    /// leaving a checkbox that draws correctly but never toggles.
+    pub(super) widget_hitboxes: RefCell<Vec<Bounds<Pixels>>>,
     pub(super) editor_paddings: Edges<Pixels>,
     pub(super) editor_style: InputEditorStyle,
 
@@ -625,6 +630,7 @@ impl<M: InputModeKind> InputBaseState<M> {
             scroll_handle: ScrollHandle::new(),
             scroll_size: gpui::size(px(0.), px(0.)),
             editor_scrollbar_snapshot: Cell::new(None),
+            widget_hitboxes: RefCell::new(Vec::new()),
             editor_paddings: Edges::default(),
             deferred_scroll_offset: None,
             preferred_column: None,
@@ -1689,6 +1695,16 @@ impl<M: InputModeKind> InputBaseState<M> {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A widget drawn over the text owns clicks that land on it.
+        if self
+            .widget_hitboxes
+            .borrow()
+            .iter()
+            .any(|bounds| bounds.contains(&event.position))
+        {
+            return;
+        }
+
         self.undo_manager.break_transaction_coalescing();
         // Input has its own text selection; suppress the window-level text
         // selection (Root) so it does not start a drag from here.

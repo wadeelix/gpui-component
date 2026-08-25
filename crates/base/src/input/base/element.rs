@@ -1559,6 +1559,7 @@ impl<M: InputModeKind> TextElement<M> {
         }
         let line_height = last_layout.line_height;
         let mut out = Vec::new();
+        let mut hitboxes = Vec::new();
         let mut offset_y = last_layout.visible_top;
 
         for (line, &buffer_line) in last_layout
@@ -1575,10 +1576,18 @@ impl<M: InputModeKind> TextElement<M> {
                 else {
                     continue;
                 };
-                let size = line.row_height(line_height);
+                // The widget stands in for the text it names, so it gets that
+                // text's width — not a square. A row-height box over a
+                // three-character `[ ]` spills past it and lands on the words
+                // after it; the widget draws itself centred in whatever room
+                // the marker occupies.
+                let end = line
+                    .position_for_index(widget.range.end, last_layout, false)
+                    .unwrap_or(at);
+                let width = (end.x - at.x).max(line_height);
                 let widget_bounds = Bounds {
                     origin: line_origin + at,
-                    size: gpui::size(size, size),
+                    size: gpui::size(width, line.row_height(line_height)),
                 };
                 let element =
                     render_inline_widget(widget, buffer_line, &style, self.state.downgrade());
@@ -1589,10 +1598,15 @@ impl<M: InputModeKind> TextElement<M> {
                     window,
                     cx,
                 );
+                hitboxes.push(widget_bounds);
                 out.push(InlineWidgetLayout { element });
             }
             offset_y += line.size(line_height).height;
         }
+
+        // Recorded for the container's mouse handler, which runs before these
+        // elements can claim an event of their own.
+        *self.state.read(cx).widget_hitboxes.borrow_mut() = hitboxes;
 
         out
     }
