@@ -474,11 +474,15 @@ fn render_block_widget(
         .flex()
         .flex_col()
         .w_full();
+    // A widget with a header owns the table's first two rows -- the labels and
+    // the rule under them; one without stands for a run of body rows alone, so
+    // its rows start at index zero.
+    let leading = if header.is_some() { 2 } else { 0 };
     for ix in rows_shown {
-        grid = match ix {
-            0 => grid.child(row(header, true).into_any_element()),
-            1 => grid.child(rule().into_any_element()),
-            _ => match rows.get(ix - 2) {
+        grid = match (ix, header) {
+            (0, Some(header)) => grid.child(row(header, true).into_any_element()),
+            (1, Some(_)) => grid.child(rule().into_any_element()),
+            _ => match rows.get(ix - leading) {
                 Some(cells) => grid.child(row(cells, false).into_any_element()),
                 None => grid,
             },

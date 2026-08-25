@@ -171,8 +171,13 @@ pub enum BlockWidgetKind {
     /// apart from the body because it is the one row a reader treats as a
     /// label, and the alignments are per column, as the delimiter row spells
     /// them.
+    ///
+    /// `header` is `None` for a widget that stands for part of a table only --
+    /// the rows below a caret being edited in place, which have no header of
+    /// their own and must not borrow the table's. Such a widget draws its rows
+    /// and nothing else, so the grid continues rather than starting again.
     Table {
-        header: Vec<String>,
+        header: Option<Vec<String>>,
         rows: Vec<Vec<String>>,
         aligns: Vec<ColumnAlign>,
     },
