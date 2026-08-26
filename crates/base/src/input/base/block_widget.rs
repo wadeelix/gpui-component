@@ -18,6 +18,10 @@ use crate::input::element::{InlineWidgetLayout, RIGHT_MARGIN};
 
 use std::ops::Range;
 
+/// Horizontal padding inside a cell. Named once: the grid draws with it and the
+/// hit map measures from it, and a click lands in the wrong place if they part.
+const CELL_PADDING_X: Pixels = px(6.);
+
 /// A block widget and the visible line it starts on, carried from layout to
 /// paint so the widget can be placed at that line's origin.
 pub(super) struct BlockWidgetPlacement {
@@ -63,7 +67,7 @@ pub(super) fn render_block_widget(
         let container = gpui::div()
             .flex_1()
             .h(row_height)
-            .px(px(6.))
+            .px(CELL_PADDING_X)
             .overflow_hidden()
             .text_align(align_of(column));
         let container = if is_header {
@@ -131,16 +135,51 @@ pub(super) fn render_block_widget(
     grid
 }
 
-/// Where one cell of a drawn table sits, and which bytes it stands for.
+/// Where one cell of a drawn table sits, which bytes it stands for, and the
+/// shape of the text drawn in it.
 ///
 /// A click has to become a buffer offset, and the lines under a widget shape
 /// to nothing, so the usual path -- resolve the point against a shaped line --
 /// puts the caret at the start of a row wherever the reader clicked. These
 /// boxes are what let the point be resolved against the grid instead.
-#[derive(Debug, Clone)]
+///
+/// `shaped` is what makes the caret land where the reader aimed rather than at
+/// the cell's left edge: the same text, shaped the same way it was drawn, so
+/// the x of a click can be turned into an index within the cell.
+#[derive(Clone)]
 pub(crate) struct CellHitbox {
     pub(crate) bounds: gpui::Bounds<Pixels>,
     pub(crate) range: std::ops::Range<usize>,
+    /// Text left padding inside the cell, so a click's x is measured from
+    /// where the text actually starts.
+    pub(crate) text_left: Pixels,
+    pub(crate) shaped: Option<gpui::ShapedLine>,
+}
+
+impl CellHitbox {
+    /// The buffer offset a click at `position` names inside this cell.
+    ///
+    /// Falls back to the start of the cell when the text could not be shaped,
+    /// which is the behaviour this had before it could aim.
+    pub(crate) fn offset_for(&self, position: gpui::Point<Pixels>) -> usize {
+        let Some(shaped) = self.shaped.as_ref() else {
+            return self.range.start;
+        };
+        let x = position.x - self.bounds.origin.x - self.text_left;
+        let index = shaped.closest_index_for_x(x.max(px(0.)));
+        // The shaped text is the cell as drawn, so an index into it is an
+        // offset into the cell's bytes -- but never past them.
+        self.range.start + index.min(self.range.len())
+    }
+}
+
+impl std::fmt::Debug for CellHitbox {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CellHitbox")
+            .field("bounds", &self.bounds)
+            .field("range", &self.range)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Prepaints each block widget over the rows its lines occupy: full text
@@ -223,6 +262,7 @@ pub(super) fn layout_block_widgets<M: InputModeKind>(
             line_height,
             placement.rows_skipped,
             placement.line_count,
+            window,
         ));
         out.push(InlineWidgetLayout { element });
     }
@@ -235,7 +275,13 @@ pub(super) fn layout_block_widgets<M: InputModeKind>(
 /// same width -- that is what makes this computable without asking the layout
 /// engine back. If the grid ever stops sharing width equally, this has to learn
 /// how it does instead, or clicks will land in the wrong column.
-fn cell_hitboxes(
+/// The geometry half of [`cell_hitboxes`], without shaping the text.
+///
+/// Shaping needs a window; the boxes' positions do not. Tests that assert where
+/// a cell landed use this, and the caret then falls back to the cell's start
+/// exactly as it did before cells could be aimed at.
+#[cfg(test)]
+fn cell_hitboxes_unshaped(
     widget: &crate::input::BlockWidget,
     origin: gpui::Point<Pixels>,
     width: Pixels,
@@ -245,7 +291,6 @@ fn cell_hitboxes(
     rows_shown: usize,
 ) -> Vec<CellHitbox> {
     let crate::input::BlockWidgetKind::Table { header, rows, .. } = &widget.kind;
-
     let columns = header
         .len()
         .max(rows.iter().map(Vec::len).max().unwrap_or(0));
@@ -253,10 +298,8 @@ fn cell_hitboxes(
         return Vec::new();
     }
     let column_width = width / columns as f32;
-
     let mut out = Vec::new();
     for row_ix in rows_skipped..rows_skipped + rows_shown {
-        // Row 0 is the header, row 1 the rule under it, and the body follows.
         let cells = match row_ix {
             0 => header,
             1 => continue,
@@ -277,6 +320,79 @@ fn cell_hitboxes(
                     gpui::size(column_width, row_height).into(),
                 ),
                 range: cell.range.clone(),
+                text_left: CELL_PADDING_X,
+                shaped: None,
+            });
+        }
+    }
+    out
+}
+
+fn cell_hitboxes(
+    widget: &crate::input::BlockWidget,
+    origin: gpui::Point<Pixels>,
+    width: Pixels,
+    height: Pixels,
+    row_height: Pixels,
+    rows_skipped: usize,
+    rows_shown: usize,
+    window: &mut Window,
+) -> Vec<CellHitbox> {
+    let crate::input::BlockWidgetKind::Table { header, rows, .. } = &widget.kind;
+
+    let columns = header
+        .len()
+        .max(rows.iter().map(Vec::len).max().unwrap_or(0));
+    if columns == 0 {
+        return Vec::new();
+    }
+    let column_width = width / columns as f32;
+    let text_style = window.text_style();
+    let font_size = text_style.font_size.to_pixels(window.rem_size());
+
+    let mut out = Vec::new();
+    for row_ix in rows_skipped..rows_skipped + rows_shown {
+        // Row 0 is the header, row 1 the rule under it, and the body follows.
+        let cells = match row_ix {
+            0 => header,
+            1 => continue,
+            n => match rows.get(n - 2) {
+                Some(cells) => cells,
+                None => continue,
+            },
+        };
+        let top = origin.y + row_height * (row_ix - rows_skipped) as f32;
+        if top + row_height > origin.y + height {
+            break;
+        }
+        for (column, cell) in cells.iter().enumerate() {
+            let left = origin.x + column_width * column as f32;
+            // The same text, shaped the way the cell drew it, so a click's x
+            // becomes an index within the cell rather than its left edge.
+            let shaped = (!cell.text.is_empty()).then(|| {
+                let run = gpui::TextRun {
+                    len: cell.text.len(),
+                    font: text_style.font(),
+                    color: text_style.color,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                window.text_system().shape_line(
+                    SharedString::from(cell.text.clone()),
+                    font_size,
+                    &[run],
+                    None,
+                )
+            });
+            out.push(CellHitbox {
+                bounds: gpui::Bounds::new(
+                    point(left, top),
+                    gpui::size(column_width, row_height).into(),
+                ),
+                range: cell.range.clone(),
+                text_left: CELL_PADDING_X,
+                shaped,
             });
         }
     }
@@ -310,7 +426,7 @@ mod tests {
             },
         };
 
-        let boxes = cell_hitboxes(
+        let boxes = cell_hitboxes_unshaped(
             &widget,
             point(px(0.), px(0.)),
             px(200.),
@@ -334,6 +450,30 @@ mod tests {
         assert_eq!(boxes[2].bounds.origin.y, px(40.));
     }
 
+    /// A click inside a cell names the character it landed on, not the cell.
+    ///
+    /// Answering with the cell's first byte put the caret against the left
+    /// border wherever the reader aimed, which is what made a cell feel like a
+    /// button rather than text.
+    #[test]
+    fn a_click_inside_a_cell_names_where_it_landed() {
+        // Shaping needs a window, so the arithmetic is checked directly: a hit
+        // box with no shaped line answers with the cell's start, and one with a
+        // line answers by x. The second half is covered by the element tests,
+        // which have a window; this pins the fallback and the padding.
+        let hit = CellHitbox {
+            bounds: gpui::Bounds::new(point(px(10.), px(0.)), gpui::size(px(100.), px(20.)).into()),
+            range: 5..9,
+            text_left: CELL_PADDING_X,
+            shaped: None,
+        };
+        assert_eq!(
+            hit.offset_for(point(px(60.), px(5.))),
+            5,
+            "with nothing shaped, a click still names the cell it is in"
+        );
+    }
+
     /// A table scrolled partly off the top draws from the row it resumes at,
     /// and the boxes have to follow -- or a click would name a cell that is
     /// not where the reader sees it.
@@ -349,7 +489,7 @@ mod tests {
         };
 
         // Only the body row is on screen: rows 0 and 1 scrolled away.
-        let boxes = cell_hitboxes(
+        let boxes = cell_hitboxes_unshaped(
             &widget,
             point(px(0.), px(0.)),
             px(100.),

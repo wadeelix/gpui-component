@@ -2207,7 +2207,10 @@ impl<M: InputModeKind> InputBaseState<M> {
             .iter()
             .find(|hit| hit.bounds.contains(&position))
         {
-            return hit.range.start;
+            // Where in the cell's text the click landed, not merely which cell:
+            // answering with the cell's start put the caret against the left
+            // border wherever the reader aimed.
+            return hit.offset_for(position);
         }
 
         let (Some(bounds), Some(last_layout)) =
@@ -3451,10 +3454,14 @@ mod tests {
                     CellHitbox {
                         bounds: Bounds::new(point(px(0.), px(0.)), size(px(100.), px(20.))),
                         range: 2..3,
+                        text_left: px(6.),
+                        shaped: None,
                     },
                     CellHitbox {
                         bounds: Bounds::new(point(px(100.), px(0.)), size(px(100.), px(20.))),
                         range: 6..7,
+                        text_left: px(6.),
+                        shaped: None,
                     },
                 ];
             })
