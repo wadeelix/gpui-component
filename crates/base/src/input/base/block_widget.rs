@@ -56,23 +56,32 @@ pub(super) fn render_block_widget(
         crate::input::ColumnAlign::Right => TextAlign::Right,
     };
 
-    let cell = |cell: &crate::input::TableCell, column: usize, is_header: bool| {
-        let text = &cell.text;
+    let cell = |one: &crate::input::TableCell, column: usize, is_header: bool| {
         // Only horizontal padding: a row has to be exactly as tall as the
         // buffer line it stands in for, or the grid outgrows the rows reserved
         // for it and the prose after the table is drawn over.
-        let cell = gpui::div()
+        let container = gpui::div()
             .flex_1()
             .h(row_height)
             .px(px(6.))
             .overflow_hidden()
             .text_align(align_of(column));
-        let cell = if is_header {
-            cell.font_weight(gpui::FontWeight::BOLD)
+        let container = if is_header {
+            container.font_weight(gpui::FontWeight::BOLD)
         } else {
-            cell
+            container
         };
-        cell.child(SharedString::from(text.clone()))
+        // The application may own an editor for the cell being edited. It is
+        // asked by byte range rather than by row and column, so the widget
+        // never has to agree with it about how a table is numbered.
+        match style
+            .table_cell_renderer
+            .as_ref()
+            .and_then(|render| render(&one.range))
+        {
+            Some(editor) => container.child(editor),
+            None => container.child(SharedString::from(one.text.clone())),
+        }
     };
 
     let row = |cells: &Vec<crate::input::TableCell>, is_header: bool| {

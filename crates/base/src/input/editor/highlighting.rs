@@ -207,6 +207,18 @@ pub type InputHighlighterFactory = Rc<dyn Fn(&str) -> Option<Box<dyn InputHighli
 pub type SharedHighlightStyleResolver = Arc<dyn HighlightStyleResolver>;
 pub type FoldIconRenderer = Rc<dyn Fn(usize, bool) -> AnyElement>;
 
+/// Draws the cell of a table widget that is being edited, given the byte range
+/// of its text.
+///
+/// The same shape as [`FoldIconRenderer`], and for the same reason: a widget is
+/// built during `prepaint`, where the engine cannot create an entity, but an
+/// application that made one earlier can hand over an element that uses it.
+/// That is what lets a table keep its grid while one cell is edited in place --
+/// the editor for the cell belongs to the application, not to this crate.
+///
+/// Returning `None` leaves the cell drawn as ordinary text.
+pub type TableCellRenderer = Rc<dyn Fn(&Range<usize>) -> Option<AnyElement>>;
+
 #[derive(Clone, Copy, Default)]
 pub struct DiagnosticColors {
     pub error: Hsla,
@@ -230,6 +242,8 @@ pub struct InputEditorStyle {
     pub editor_active_line: Option<Hsla>,
     pub editor_gutter_background: Option<Hsla>,
     pub fold_icon_renderer: Option<FoldIconRenderer>,
+    /// Draws the table cell being edited, if any.
+    pub table_cell_renderer: Option<TableCellRenderer>,
 }
 
 impl Default for InputEditorStyle {
@@ -247,6 +261,7 @@ impl Default for InputEditorStyle {
             editor_active_line: None,
             editor_gutter_background: None,
             fold_icon_renderer: None,
+            table_cell_renderer: None,
         }
     }
 }
