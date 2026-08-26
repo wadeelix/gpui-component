@@ -2201,23 +2201,13 @@ impl<M: InputModeKind> InputBaseState<M> {
         // inside one has to be answered by the grid: resolving it against those
         // lines puts the caret at the start of a row wherever it landed, which
         // is what made a table impossible to aim at.
+        if let Some(hit) = self
+            .cell_hitboxes
+            .borrow()
+            .iter()
+            .find(|hit| hit.bounds.contains(&position))
         {
-            let cells = self.cell_hitboxes.borrow();
-            if !cells.is_empty() {
-                eprintln!("PROBE click at {position:?}");
-                for (i, hit) in cells.iter().enumerate().take(6) {
-                    eprintln!(
-                        "PROBE   cell {i} bounds={:?} size={:?} range={:?} contains={}",
-                        hit.bounds.origin,
-                        hit.bounds.size,
-                        hit.range,
-                        hit.bounds.contains(&position)
-                    );
-                }
-            }
-            if let Some(hit) = cells.iter().find(|hit| hit.bounds.contains(&position)) {
-                return hit.range.start;
-            }
+            return hit.range.start;
         }
 
         let (Some(bounds), Some(last_layout)) =
@@ -3430,6 +3420,60 @@ mod tests {
             cx.update(|_, cx| parent.read(cx).text().to_string()),
             document,
             "one undo restored the document, so a cell edit is one step"
+        );
+    }
+
+    /// A click inside a drawn table names the cell it landed in.
+    ///
+    /// The plumbing behind this was silently lost once -- a revert took the
+    /// call site with it, every unit test still passed because they called the
+    /// geometry directly, and clicking a table put the caret at the start of a
+    /// row again. This asserts the wiring, not the arithmetic.
+    #[gpui::test]
+    fn a_click_inside_a_table_resolves_to_its_cell(cx: &mut TestAppContext) {
+        use crate::input::block_widget::CellHitbox;
+        use gpui::size;
+
+        let view = InputView::<EditorMode>::new(cx);
+        let mut cx = VisualTestContext::from_window(view.window_handle.into(), cx);
+        let input = view.input;
+
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.set_value("| a | b |\n|---|---|\n| 1 | 2 |", window, cx);
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            input.update(cx, |state, _| {
+                // Two cells side by side, as a drawn grid would place them.
+                *state.cell_hitboxes.borrow_mut() = vec![
+                    CellHitbox {
+                        bounds: Bounds::new(point(px(0.), px(0.)), size(px(100.), px(20.))),
+                        range: 2..3,
+                    },
+                    CellHitbox {
+                        bounds: Bounds::new(point(px(100.), px(0.)), size(px(100.), px(20.))),
+                        range: 6..7,
+                    },
+                ];
+            })
+        });
+
+        let (first, second, outside) = cx.update(|_, cx| {
+            let state = input.read(cx);
+            (
+                state.index_for_mouse_position(point(px(50.), px(10.))),
+                state.index_for_mouse_position(point(px(150.), px(10.))),
+                state.index_for_mouse_position(point(px(50.), px(400.))),
+            )
+        });
+
+        assert_eq!(first, 2, "a click in the first cell names its bytes");
+        assert_eq!(second, 6, "and the second cell names its own");
+        assert_ne!(
+            outside, 2,
+            "a click below the table is not answered by the grid"
         );
     }
 

@@ -2443,7 +2443,7 @@ impl<M: InputModeKind> Element for TextElement<M> {
         let fold_icon_layout =
             self.layout_fold_icons(original_x, &bounds, &last_layout, window, cx);
         let inline_widgets = self.layout_inline_widgets(&bounds, &last_layout, window, cx);
-        let block_widgets = layout_block_widgets(
+        let (block_widgets, cell_hits) = layout_block_widgets(
             &self.state,
             &block_placements,
             &bounds,
@@ -2451,6 +2451,9 @@ impl<M: InputModeKind> Element for TextElement<M> {
             window,
             cx,
         );
+        // A click inside a drawn table is answered by these rather than by the
+        // lines under it, which shape to nothing.
+        *self.state.read(cx).cell_hitboxes.borrow_mut() = cell_hits;
 
         PrepaintState {
             bounds,

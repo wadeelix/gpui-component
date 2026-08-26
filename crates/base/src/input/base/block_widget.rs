@@ -150,9 +150,9 @@ pub(super) fn layout_block_widgets<M: InputModeKind>(
     last_layout: &LastLayout,
     window: &mut Window,
     cx: &mut App,
-) -> Vec<InlineWidgetLayout> {
+) -> (Vec<InlineWidgetLayout>, Vec<CellHitbox>) {
     if placements.is_empty() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
     // `bounds` arrives already shifted by the scroll offset — `layout_cursor`
     // adds it in place — so adding it again put every widget a screenful to
@@ -162,7 +162,7 @@ pub(super) fn layout_block_widgets<M: InputModeKind>(
         (state.masked, state.editor_style.clone())
     };
     if masked {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
 
     let line_height = last_layout.line_height;
@@ -176,6 +176,7 @@ pub(super) fn layout_block_widgets<M: InputModeKind>(
     }
 
     let mut out = Vec::new();
+    let mut hits = Vec::new();
     for placement in placements {
         let Some(&top) = offsets.get(placement.line_index) else {
             continue;
@@ -207,9 +208,20 @@ pub(super) fn layout_block_widgets<M: InputModeKind>(
         )
         .into_any_element();
         element.prepaint_as_root(origin, gpui::size(width, height).into(), window, cx);
+        // Where each cell landed, so a click can be resolved against the grid
+        // rather than against the lines under it, which shape to nothing.
+        hits.extend(cell_hitboxes(
+            &placement.widget,
+            origin,
+            width,
+            height,
+            line_height,
+            placement.rows_skipped,
+            placement.line_count,
+        ));
         out.push(InlineWidgetLayout { element });
     }
-    out
+    (out, hits)
 }
 
 /// Where each cell of `widget` landed inside the box it was drawn in.
