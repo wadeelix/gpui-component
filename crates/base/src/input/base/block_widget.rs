@@ -60,11 +60,19 @@ pub(super) fn render_block_widget(
         // Only horizontal padding: a row has to be exactly as tall as the
         // buffer line it stands in for, or the grid outgrows the rows reserved
         // for it and the prose after the table is drawn over.
+        // The row is as tall as the buffer line it stands for, and that line
+        // wraps when a cell holds more than fits across -- so the cell wraps
+        // with it. Clipping instead made a cell's text disappear from view
+        // while the document still held every character of it.
+        //
+        // `min_w_0` is what makes it wrap rather than grow: a flex item's
+        // minimum size is its content by default, so a long cell pushed the
+        // columns beside it off the table instead of folding its own text.
         let cell = gpui::div()
             .flex_1()
+            .min_w_0()
             .h(row_height)
             .px(px(6.))
-            .overflow_hidden()
             .text_align(align_of(column));
         let cell = if is_header {
             cell.font_weight(gpui::FontWeight::BOLD)
