@@ -7,7 +7,7 @@ use gpui::{
 
 use super::{EditorState, Input};
 use crate::native_menu::NativeMenu;
-use crate::{ActiveTheme as _, RoleOverride, StyledExt as _};
+use crate::{ActiveTheme as _, RoleOverride, Sizable, Size, StyledExt as _};
 
 /// A code editor takes its rows from the font, so that a smaller or larger
 /// font keeps its leading in proportion.
@@ -19,6 +19,7 @@ pub struct Editor {
     state: Entity<EditorState>,
     style: StyleRefinement,
     height: Option<DefiniteLength>,
+    size: Size,
     appearance: bool,
     bordered: bool,
     disabled: bool,
@@ -40,6 +41,7 @@ impl Editor {
             state: state.clone(),
             style: StyleRefinement::default(),
             height: None,
+            size: Size::default(),
             appearance: true,
             bordered: true,
             disabled: false,
@@ -127,6 +129,17 @@ impl Styled for Editor {
     }
 }
 
+/// An editor takes a size the way every other input does, which is what sets
+/// the padding inside it. A table cell needs `Size::XSmall`: it is already
+/// inside a cell that has its own padding, and the vertical padding of a larger
+/// size leaves almost nothing of a row one line tall.
+impl Sizable for Editor {
+    fn with_size(mut self, size: impl Into<Size>) -> Self {
+        self.size = size.into();
+        self
+    }
+}
+
 impl RenderOnce for Editor {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         Input::from_state(self.state.clone())
@@ -137,6 +150,7 @@ impl RenderOnce for Editor {
             .font_family(cx.theme().mono_font_family.clone())
             .text_size(cx.theme().mono_font_size)
             .line_height(relative(EDITOR_LINE_HEIGHT))
+            .with_size(self.size)
             .appearance(self.appearance)
             .bordered(self.bordered)
             .focus_bordered(false)
