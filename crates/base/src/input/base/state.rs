@@ -2201,13 +2201,23 @@ impl<M: InputModeKind> InputBaseState<M> {
         // inside one has to be answered by the grid: resolving it against those
         // lines puts the caret at the start of a row wherever it landed, which
         // is what made a table impossible to aim at.
-        if let Some(hit) = self
-            .cell_hitboxes
-            .borrow()
-            .iter()
-            .find(|hit| hit.bounds.contains(&position))
         {
-            return hit.range.start;
+            let cells = self.cell_hitboxes.borrow();
+            if !cells.is_empty() {
+                eprintln!("PROBE click at {position:?}");
+                for (i, hit) in cells.iter().enumerate().take(6) {
+                    eprintln!(
+                        "PROBE   cell {i} bounds={:?} size={:?} range={:?} contains={}",
+                        hit.bounds.origin,
+                        hit.bounds.size,
+                        hit.range,
+                        hit.bounds.contains(&position)
+                    );
+                }
+            }
+            if let Some(hit) = cells.iter().find(|hit| hit.bounds.contains(&position)) {
+                return hit.range.start;
+            }
         }
 
         let (Some(bounds), Some(last_layout)) =
