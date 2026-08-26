@@ -129,6 +129,11 @@ pub(super) fn render_block_widget(
 /// Prepaints each block widget over the rows its lines occupy: full text
 /// width, starting at the origin of the line it was reported on, as tall as
 /// the rows the display map reserved for it.
+///
+/// Returns the prepainted elements and the boxes they occupy. The boxes are
+/// what tells the editor's own mouse handler to leave a click alone: the lines
+/// under a widget shape to nothing, so resolving a click against them would put
+/// the caret at the start of a row wherever the reader actually clicked.
 pub(super) fn layout_block_widgets<M: InputModeKind>(
     state: &Entity<InputBaseState<M>>,
     placements: &[BlockWidgetPlacement],
@@ -136,9 +141,9 @@ pub(super) fn layout_block_widgets<M: InputModeKind>(
     last_layout: &LastLayout,
     window: &mut Window,
     cx: &mut App,
-) -> Vec<InlineWidgetLayout> {
+) -> (Vec<InlineWidgetLayout>, Vec<gpui::Bounds<Pixels>>) {
     if placements.is_empty() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
     // `bounds` arrives already shifted by the scroll offset — `layout_cursor`
     // adds it in place — so adding it again put every widget a screenful to
@@ -148,7 +153,7 @@ pub(super) fn layout_block_widgets<M: InputModeKind>(
         (state.masked, state.editor_style.clone())
     };
     if masked {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
 
     let line_height = last_layout.line_height;
@@ -162,6 +167,7 @@ pub(super) fn layout_block_widgets<M: InputModeKind>(
     }
 
     let mut out = Vec::new();
+    let mut hitboxes = Vec::new();
     for placement in placements {
         let Some(&top) = offsets.get(placement.line_index) else {
             continue;
@@ -193,7 +199,12 @@ pub(super) fn layout_block_widgets<M: InputModeKind>(
         )
         .into_any_element();
         element.prepaint_as_root(origin, gpui::size(width, height).into(), window, cx);
+        // The box belongs to the widget, so a click inside it is the widget's
+        // to answer. Without this the editor's own handler takes it first and
+        // resolves it against the lines under the grid -- which shape to
+        // nothing, so every click landed at the start of a row.
+        hitboxes.push(gpui::Bounds::new(origin, gpui::size(width, height).into()));
         out.push(InlineWidgetLayout { element });
     }
-    out
+    (out, hitboxes)
 }
