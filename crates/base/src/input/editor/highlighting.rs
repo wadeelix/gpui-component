@@ -172,10 +172,25 @@ pub enum BlockWidgetKind {
     /// label, and the alignments are per column, as the delimiter row spells
     /// them.
     Table {
-        header: Vec<String>,
-        rows: Vec<Vec<String>>,
+        header: Vec<TableCell>,
+        rows: Vec<Vec<TableCell>>,
         aligns: Vec<ColumnAlign>,
     },
+}
+
+/// One cell of a table widget: the text to draw, and the buffer bytes it came
+/// from.
+///
+/// The range is what lets a cell be edited in place without the widget
+/// reparsing the document: an edit replaces exactly those bytes, so the
+/// document stays the only source of truth (spec §4 I1) and the edit is one
+/// undo step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableCell {
+    /// Cell text with its surrounding padding removed, as drawn.
+    pub text: String,
+    /// Raw byte range of the cell's text in the buffer.
+    pub range: Range<usize>,
 }
 
 /// Column alignment of a GFM pipe table, as its delimiter row spells it

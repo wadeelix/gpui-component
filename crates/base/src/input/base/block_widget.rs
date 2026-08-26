@@ -56,7 +56,8 @@ pub(super) fn render_block_widget(
         crate::input::ColumnAlign::Right => TextAlign::Right,
     };
 
-    let cell = |text: &String, column: usize, is_header: bool| {
+    let cell = |cell: &crate::input::TableCell, column: usize, is_header: bool| {
+        let text = &cell.text;
         // Only horizontal padding: a row has to be exactly as tall as the
         // buffer line it stands in for, or the grid outgrows the rows reserved
         // for it and the prose after the table is drawn over.
@@ -74,10 +75,10 @@ pub(super) fn render_block_widget(
         cell.child(SharedString::from(text.clone()))
     };
 
-    let row = |cells: &Vec<String>, is_header: bool| {
+    let row = |cells: &Vec<crate::input::TableCell>, is_header: bool| {
         let mut line = gpui::div().flex().flex_row().w_full().h(row_height);
-        for (column, text) in cells.iter().enumerate() {
-            line = line.child(cell(text, column, is_header));
+        for (column, one) in cells.iter().enumerate() {
+            line = line.child(cell(one, column, is_header));
         }
         line
     };

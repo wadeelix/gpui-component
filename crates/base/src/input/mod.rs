@@ -78,7 +78,7 @@ pub use editor::{Editor, EditorState};
 pub use highlighting::{
     BlockWidget, BlockWidgetKind, ColumnAlign, DiagnosticColors, FoldIconRenderer,
     HighlightStyleResolver, InlineWidget, InlineWidgetKind, InputEditorStyle, InputHighlighter,
-    InputHighlighterFactory, SharedHighlightStyleResolver,
+    InputHighlighterFactory, SharedHighlightStyleResolver, TableCell,
 };
 pub use indent::TabSize;
 pub use input::{Input, InputState};
