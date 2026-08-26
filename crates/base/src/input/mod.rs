@@ -13,6 +13,8 @@ pub(crate) const MASK_CHAR: char = '•';
 mod base;
 #[path = "base/blink_cursor.rs"]
 pub(crate) mod blink_cursor;
+#[path = "base/block_widget.rs"]
+mod block_widget;
 #[path = "base/change.rs"]
 mod change;
 #[path = "base/cursor.rs"]
