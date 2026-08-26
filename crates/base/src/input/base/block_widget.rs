@@ -46,6 +46,7 @@ pub(super) fn render_block_widget(
     line_index: usize,
     rows_shown: Range<usize>,
     row_height: Pixels,
+    row_heights: &[Pixels],
     style: &crate::input::InputEditorStyle,
 ) -> impl IntoElement {
     let crate::input::BlockWidgetKind::Table {
@@ -60,13 +61,29 @@ pub(super) fn render_block_widget(
         crate::input::ColumnAlign::Right => TextAlign::Right,
     };
 
-    let cell = |one: &crate::input::TableCell, row: usize, column: usize, is_header: bool| {
+    // A row is as tall as the buffer line it stands for. Those lines wrap when
+    // a cell holds more than fits, and the engine has already reserved the room
+    // for the wrapped rows -- so a grid that drew every row one line tall left
+    // an invisible gap that pushed the prose below the table down.
+    let height_of = |row_ix: usize| {
+        row_heights
+            .get(row_ix)
+            .copied()
+            .filter(|h| *h > px(0.))
+            .unwrap_or(row_height)
+    };
+
+    let cell = |one: &crate::input::TableCell,
+                row: usize,
+                column: usize,
+                is_header: bool,
+                height: Pixels| {
         // Only horizontal padding: a row has to be exactly as tall as the
         // buffer line it stands in for, or the grid outgrows the rows reserved
         // for it and the prose after the table is drawn over.
         let container = gpui::div()
             .flex_1()
-            .h(row_height)
+            .h(height)
             .px(CELL_PADDING_X)
             .overflow_hidden()
             .text_align(align_of(column));
@@ -93,20 +110,21 @@ pub(super) fn render_block_widget(
 
     // `row` counts the way the application does: 0 is the header, 1.. are body
     // rows, and the delimiter is scaffolding with no cells of its own.
-    let row = |cells: &Vec<crate::input::TableCell>, row_ix: usize, is_header: bool| {
-        let mut line = gpui::div().flex().flex_row().w_full().h(row_height);
-        for (column, one) in cells.iter().enumerate() {
-            line = line.child(cell(one, row_ix, column, is_header));
-        }
-        line
-    };
+    let row =
+        |cells: &Vec<crate::input::TableCell>, row_ix: usize, is_header: bool, height: Pixels| {
+            let mut line = gpui::div().flex().flex_row().w_full().h(height);
+            for (column, one) in cells.iter().enumerate() {
+                line = line.child(cell(one, row_ix, column, is_header, height));
+            }
+            line
+        };
 
     // The table's rows in buffer order. The delimiter row is scaffolding rather
     // than data: it is one of the buffer lines the widget covers, and its row
     // is where the header's rule is drawn.
-    let rule = || {
+    let rule = |height: Pixels| {
         gpui::div()
-            .h(row_height)
+            .h(height)
             .w_full()
             .flex()
             .items_center()
@@ -124,10 +142,12 @@ pub(super) fn render_block_widget(
         .w_full();
     for ix in rows_shown {
         grid = match ix {
-            0 => grid.child(row(header, 0, true).into_any_element()),
-            1 => grid.child(rule().into_any_element()),
+            0 => grid.child(row(header, 0, true, height_of(0)).into_any_element()),
+            1 => grid.child(rule(height_of(1)).into_any_element()),
             _ => match rows.get(ix - 2) {
-                Some(cells) => grid.child(row(cells, ix - 1, false).into_any_element()),
+                Some(cells) => {
+                    grid.child(row(cells, ix - 1, false, height_of(ix)).into_any_element())
+                }
                 None => grid,
             },
         };
@@ -243,11 +263,22 @@ pub(super) fn layout_block_widgets<M: InputModeKind>(
         // full width would sit underneath it.
         let width = (bounds.size.width - last_layout.line_number_width - RIGHT_MARGIN).max(px(0.));
         let rows_shown = placement.rows_skipped..placement.rows_skipped + placement.line_count;
+        // The height of every line this widget covers, in the order the grid
+        // draws them, so a row that wraps is drawn as tall as the room the
+        // engine already made for it.
+        let row_heights: Vec<Pixels> = last_layout
+            .lines
+            .iter()
+            .skip(placement.line_index)
+            .take(placement.line_count)
+            .map(|line| line.size(line_height).height)
+            .collect();
         let mut element = render_block_widget(
             &placement.widget,
             placement.line_index,
             rows_shown,
             line_height,
+            &row_heights,
             &style,
         )
         .into_any_element();
@@ -260,6 +291,7 @@ pub(super) fn layout_block_widgets<M: InputModeKind>(
             width,
             height,
             line_height,
+            &row_heights,
             placement.rows_skipped,
             placement.line_count,
             window,
@@ -299,16 +331,22 @@ fn cell_hitboxes_unshaped(
     }
     let column_width = width / columns as f32;
     let mut out = Vec::new();
+    let mut top = origin.y;
     for row_ix in rows_skipped..rows_skipped + rows_shown {
         let cells = match row_ix {
             0 => header,
-            1 => continue,
+            1 => {
+                top += row_height;
+                continue;
+            }
             n => match rows.get(n - 2) {
                 Some(cells) => cells,
-                None => continue,
+                None => {
+                    top += row_height;
+                    continue;
+                }
             },
         };
-        let top = origin.y + row_height * (row_ix - rows_skipped) as f32;
         if top + row_height > origin.y + height {
             break;
         }
@@ -324,6 +362,7 @@ fn cell_hitboxes_unshaped(
                 shaped: None,
             });
         }
+        top += row_height;
     }
     out
 }
@@ -334,6 +373,7 @@ fn cell_hitboxes(
     width: Pixels,
     height: Pixels,
     row_height: Pixels,
+    row_heights: &[Pixels],
     rows_skipped: usize,
     rows_shown: usize,
     window: &mut Window,
@@ -350,19 +390,36 @@ fn cell_hitboxes(
     let text_style = window.text_style();
     let font_size = text_style.font_size.to_pixels(window.rem_size());
 
+    let height_of = |row_ix: usize| {
+        row_heights
+            .get(row_ix)
+            .copied()
+            .filter(|h| *h > px(0.))
+            .unwrap_or(row_height)
+    };
+
     let mut out = Vec::new();
+    // Rows can differ in height once a cell wraps, so their tops are summed
+    // rather than multiplied -- the boxes must land where the grid drew them.
+    let mut top = origin.y;
     for row_ix in rows_skipped..rows_skipped + rows_shown {
+        let this_height = height_of(row_ix);
         // Row 0 is the header, row 1 the rule under it, and the body follows.
         let cells = match row_ix {
             0 => header,
-            1 => continue,
+            1 => {
+                top += this_height;
+                continue;
+            }
             n => match rows.get(n - 2) {
                 Some(cells) => cells,
-                None => continue,
+                None => {
+                    top += this_height;
+                    continue;
+                }
             },
         };
-        let top = origin.y + row_height * (row_ix - rows_skipped) as f32;
-        if top + row_height > origin.y + height {
+        if top + this_height > origin.y + height {
             break;
         }
         for (column, cell) in cells.iter().enumerate() {
@@ -388,13 +445,14 @@ fn cell_hitboxes(
             out.push(CellHitbox {
                 bounds: gpui::Bounds::new(
                     point(left, top),
-                    gpui::size(column_width, row_height).into(),
+                    gpui::size(column_width, this_height).into(),
                 ),
                 range: cell.range.clone(),
                 text_left: CELL_PADDING_X,
                 shaped,
             });
         }
+        top += this_height;
     }
     out
 }
