@@ -81,11 +81,14 @@ pub(super) fn render_block_widget(
         // Only horizontal padding: a row has to be exactly as tall as the
         // buffer line it stands in for, or the grid outgrows the rows reserved
         // for it and the prose after the table is drawn over.
+        // The row is as tall as the buffer line it stands for, and that line
+        // wraps when a cell holds more than fits across -- so the cell wraps
+        // too. Clipping it instead showed a cell's text vanishing the moment
+        // its editor closed, while the document still held every character.
         let container = gpui::div()
             .flex_1()
             .h(height)
             .px(CELL_PADDING_X)
-            .overflow_hidden()
             .text_align(align_of(column));
         let container = if is_header {
             container.font_weight(gpui::FontWeight::BOLD)
