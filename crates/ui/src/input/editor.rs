@@ -31,6 +31,7 @@ pub struct Editor {
     ///
     /// If set, this overrides the built-in context menu.
     context_menu_builder: Option<Rc<dyn Fn(NativeMenu, &mut Window, &mut App) -> NativeMenu>>,
+    table_cell_renderer: Option<gpui_base::input::TableCellRenderer>,
 }
 
 impl Editor {
@@ -47,6 +48,7 @@ impl Editor {
             role: RoleOverride::default(),
             aria_label: None,
             context_menu_builder: None,
+            table_cell_renderer: None,
         }
     }
 
@@ -106,6 +108,17 @@ impl Editor {
         self.context_menu_builder = Some(Rc::new(f));
         self
     }
+
+    /// Draws the table cell whose text occupies the given byte range, so a
+    /// table can keep its grid while one cell is edited in place. See
+    /// [`super::Input::table_cell`].
+    pub fn table_cell(
+        mut self,
+        f: impl Fn(&std::ops::Range<usize>) -> Option<gpui::AnyElement> + 'static,
+    ) -> Self {
+        self.table_cell_renderer = Some(Rc::new(f));
+        self
+    }
 }
 
 impl Styled for Editor {
@@ -135,6 +148,9 @@ impl RenderOnce for Editor {
             .when_some(self.aria_label, |this, label| this.aria_label(label))
             .when_some(self.context_menu_builder, |this, build| {
                 this.context_menu(move |menu, window, cx| build(menu, window, cx))
+            })
+            .when_some(self.table_cell_renderer, |this, render| {
+                this.table_cell(move |range| render(range))
             })
             .refine_style(&self.style)
     }

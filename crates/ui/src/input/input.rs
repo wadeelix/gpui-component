@@ -131,6 +131,7 @@ pub struct Input {
     ///
     /// If set, this overrides the built-in context menu.
     context_menu_builder: Option<Rc<dyn Fn(NativeMenu, &mut Window, &mut App) -> NativeMenu>>,
+    table_cell_renderer: Option<gpui_base::input::TableCellRenderer>,
 }
 
 impl Sizable for Input {
@@ -198,6 +199,7 @@ impl Input {
             accessibility_id: None,
             aria_label: None,
             context_menu_builder: None,
+            table_cell_renderer: None,
         }
     }
 
@@ -314,6 +316,21 @@ impl Input {
         self
     }
 
+    /// Draws the table cell whose text occupies the given byte range, so a
+    /// table can keep its grid while one cell is edited in place.
+    ///
+    /// The element belongs to the caller -- typically one built around an
+    /// editor entity it owns -- because a block widget is assembled during
+    /// `prepaint`, where no entity can be created. Returning `None` leaves the
+    /// cell drawn as ordinary text.
+    pub fn table_cell(
+        mut self,
+        f: impl Fn(&std::ops::Range<usize>) -> Option<gpui::AnyElement> + 'static,
+    ) -> Self {
+        self.table_cell_renderer = Some(Rc::new(f));
+        self
+    }
+
     fn render_toggle_mask_button(state: &TextInputState, cx: &App) -> impl IntoElement {
         let masked = state.presentation(cx).is_masked();
         Button::new("toggle-mask")
@@ -391,6 +408,7 @@ impl RenderOnce for Input {
                 editor_invisible: cx.theme().highlight_theme.style.editor_invisible,
                 editor_active_line: cx.theme().highlight_theme.style.editor_active_line,
                 editor_gutter_background: cx.theme().highlight_theme.style.editor_gutter_background,
+                table_cell_renderer: self.table_cell_renderer.clone(),
                 fold_icon_renderer: Some(Rc::new(|ix, is_folded| {
                     Button::new(("fold-icon", ix))
                         .ghost()
