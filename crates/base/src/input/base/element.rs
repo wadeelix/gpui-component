@@ -573,6 +573,28 @@ impl<M: InputModeKind> TextElement<M> {
                     return line_origin + pos;
                 }
             }
+
+            // A line drawn as a table shapes to nothing, so there is no shaped
+            // line to place the caret in and it would fall to the row's left
+            // edge -- visibly wrong, since the click that put it there landed
+            // in a cell further along. The cell's own box answers instead.
+            //
+            // Those boxes are last frame's: the widgets are laid out after this
+            // runs, because laying out the caret is what settles the scroll
+            // offset they are placed against. A caret one frame behind a
+            // scrolling table is not noticeable; a caret in the wrong cell is.
+            // The box is in screen space, and the caller adds the editor's
+            // own origin and gutter back on, so both are taken off here.
+            if let Some(hit) = state
+                .cell_hitboxes
+                .borrow()
+                .iter()
+                .find(|hit| hit.range.start <= offset && offset <= hit.range.end)
+            {
+                let x = hit.bounds.origin.x - bounds.left() - last_layout.line_number_width;
+                return point(x.max(px(0.)), top);
+            }
+
             line_origin
         };
 
