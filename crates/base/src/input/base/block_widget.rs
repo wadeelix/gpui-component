@@ -126,14 +126,23 @@ pub(super) fn render_block_widget(
     grid
 }
 
+/// Where one cell of a drawn table sits, and which bytes it stands for.
+///
+/// A click has to become a buffer offset, and the lines under a widget shape
+/// to nothing, so the usual path -- resolve the point against a shaped line --
+/// puts the caret at the start of a row wherever the reader clicked. These
+/// boxes are what let the point be resolved against the grid instead.
+#[derive(Debug, Clone)]
+pub(crate) struct CellHitbox {
+    pub(crate) bounds: gpui::Bounds<Pixels>,
+    pub(crate) range: std::ops::Range<usize>,
+}
+
 /// Prepaints each block widget over the rows its lines occupy: full text
 /// width, starting at the origin of the line it was reported on, as tall as
 /// the rows the display map reserved for it.
 ///
-/// Returns the prepainted elements and the boxes they occupy. The boxes are
-/// what tells the editor's own mouse handler to leave a click alone: the lines
-/// under a widget shape to nothing, so resolving a click against them would put
-/// the caret at the start of a row wherever the reader actually clicked.
+/// Returns the prepainted elements and where each cell of each table landed.
 pub(super) fn layout_block_widgets<M: InputModeKind>(
     state: &Entity<InputBaseState<M>>,
     placements: &[BlockWidgetPlacement],
@@ -141,9 +150,9 @@ pub(super) fn layout_block_widgets<M: InputModeKind>(
     last_layout: &LastLayout,
     window: &mut Window,
     cx: &mut App,
-) -> (Vec<InlineWidgetLayout>, Vec<gpui::Bounds<Pixels>>) {
+) -> Vec<InlineWidgetLayout> {
     if placements.is_empty() {
-        return (Vec::new(), Vec::new());
+        return Vec::new();
     }
     // `bounds` arrives already shifted by the scroll offset — `layout_cursor`
     // adds it in place — so adding it again put every widget a screenful to
@@ -153,7 +162,7 @@ pub(super) fn layout_block_widgets<M: InputModeKind>(
         (state.masked, state.editor_style.clone())
     };
     if masked {
-        return (Vec::new(), Vec::new());
+        return Vec::new();
     }
 
     let line_height = last_layout.line_height;
@@ -167,7 +176,6 @@ pub(super) fn layout_block_widgets<M: InputModeKind>(
     }
 
     let mut out = Vec::new();
-    let mut hitboxes = Vec::new();
     for placement in placements {
         let Some(&top) = offsets.get(placement.line_index) else {
             continue;
@@ -199,12 +207,146 @@ pub(super) fn layout_block_widgets<M: InputModeKind>(
         )
         .into_any_element();
         element.prepaint_as_root(origin, gpui::size(width, height).into(), window, cx);
-        // The box belongs to the widget, so a click inside it is the widget's
-        // to answer. Without this the editor's own handler takes it first and
-        // resolves it against the lines under the grid -- which shape to
-        // nothing, so every click landed at the start of a row.
-        hitboxes.push(gpui::Bounds::new(origin, gpui::size(width, height).into()));
         out.push(InlineWidgetLayout { element });
     }
-    (out, hitboxes)
+    out
+}
+
+/// Where each cell of `widget` landed inside the box it was drawn in.
+///
+/// The grid lays its columns out with `flex_1`, so every column of a row is the
+/// same width -- that is what makes this computable without asking the layout
+/// engine back. If the grid ever stops sharing width equally, this has to learn
+/// how it does instead, or clicks will land in the wrong column.
+fn cell_hitboxes(
+    widget: &crate::input::BlockWidget,
+    origin: gpui::Point<Pixels>,
+    width: Pixels,
+    height: Pixels,
+    row_height: Pixels,
+    rows_skipped: usize,
+    rows_shown: usize,
+) -> Vec<CellHitbox> {
+    let crate::input::BlockWidgetKind::Table { header, rows, .. } = &widget.kind;
+
+    let columns = header
+        .len()
+        .max(rows.iter().map(Vec::len).max().unwrap_or(0));
+    if columns == 0 {
+        return Vec::new();
+    }
+    let column_width = width / columns as f32;
+
+    let mut out = Vec::new();
+    for row_ix in rows_skipped..rows_skipped + rows_shown {
+        // Row 0 is the header, row 1 the rule under it, and the body follows.
+        let cells = match row_ix {
+            0 => header,
+            1 => continue,
+            n => match rows.get(n - 2) {
+                Some(cells) => cells,
+                None => continue,
+            },
+        };
+        let top = origin.y + row_height * (row_ix - rows_skipped) as f32;
+        if top + row_height > origin.y + height {
+            break;
+        }
+        for (column, cell) in cells.iter().enumerate() {
+            let left = origin.x + column_width * column as f32;
+            out.push(CellHitbox {
+                bounds: gpui::Bounds::new(
+                    point(left, top),
+                    gpui::size(column_width, row_height).into(),
+                ),
+                range: cell.range.clone(),
+            });
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::input::{BlockWidget, BlockWidgetKind, ColumnAlign, TableCell};
+
+    fn cell(text: &str, range: std::ops::Range<usize>) -> TableCell {
+        TableCell {
+            text: text.to_owned(),
+            range,
+        }
+    }
+
+    /// A click inside a drawn table has to name the cell it landed in. The
+    /// lines under the widget shape to nothing, so without these boxes every
+    /// click resolved to the start of a row -- a table could be read but never
+    /// aimed at.
+    #[test]
+    fn every_drawn_cell_gets_a_box_holding_its_bytes() {
+        let widget = BlockWidget {
+            range: 0..40,
+            kind: BlockWidgetKind::Table {
+                header: vec![cell("a", 2..3), cell("b", 6..7)],
+                rows: vec![vec![cell("1", 26..27), cell("2", 30..31)]],
+                aligns: vec![ColumnAlign::Left, ColumnAlign::Left],
+            },
+        };
+
+        let boxes = cell_hitboxes(
+            &widget,
+            point(px(0.), px(0.)),
+            px(200.),
+            px(60.),
+            px(20.),
+            0,
+            3,
+        );
+
+        // Header row and one body row; the rule between them owns no cell.
+        assert_eq!(boxes.len(), 4, "two cells in each of the two data rows");
+
+        // The columns share the width, and each box holds its own bytes.
+        assert_eq!(boxes[0].range, 2..3);
+        assert_eq!(boxes[0].bounds.origin.x, px(0.));
+        assert_eq!(boxes[1].range, 6..7);
+        assert_eq!(boxes[1].bounds.origin.x, px(100.));
+
+        // The body row sits below the header and the rule.
+        assert_eq!(boxes[2].range, 26..27);
+        assert_eq!(boxes[2].bounds.origin.y, px(40.));
+    }
+
+    /// A table scrolled partly off the top draws from the row it resumes at,
+    /// and the boxes have to follow -- or a click would name a cell that is
+    /// not where the reader sees it.
+    #[test]
+    fn boxes_follow_a_table_scrolled_off_the_top() {
+        let widget = BlockWidget {
+            range: 0..40,
+            kind: BlockWidgetKind::Table {
+                header: vec![cell("a", 2..3)],
+                rows: vec![vec![cell("1", 26..27)]],
+                aligns: vec![ColumnAlign::Left],
+            },
+        };
+
+        // Only the body row is on screen: rows 0 and 1 scrolled away.
+        let boxes = cell_hitboxes(
+            &widget,
+            point(px(0.), px(0.)),
+            px(100.),
+            px(20.),
+            px(20.),
+            2,
+            1,
+        );
+        assert_eq!(boxes.len(), 1);
+        assert_eq!(boxes[0].range, 26..27, "the body cell, not the header");
+        assert_eq!(
+            boxes[0].bounds.origin.y,
+            px(0.),
+            "drawn at the top of the box"
+        );
+    }
 }

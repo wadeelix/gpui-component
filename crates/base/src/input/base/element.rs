@@ -2443,7 +2443,7 @@ impl<M: InputModeKind> Element for TextElement<M> {
         let fold_icon_layout =
             self.layout_fold_icons(original_x, &bounds, &last_layout, window, cx);
         let inline_widgets = self.layout_inline_widgets(&bounds, &last_layout, window, cx);
-        let (block_widgets, block_hitboxes) = layout_block_widgets(
+        let block_widgets = layout_block_widgets(
             &self.state,
             &block_placements,
             &bounds,
@@ -2451,13 +2451,6 @@ impl<M: InputModeKind> Element for TextElement<M> {
             window,
             cx,
         );
-        // Added to whatever the inline widgets registered, so a checkbox and a
-        // table both keep their own clicks.
-        self.state
-            .read(cx)
-            .widget_hitboxes
-            .borrow_mut()
-            .extend(block_hitboxes);
 
         PrepaintState {
             bounds,

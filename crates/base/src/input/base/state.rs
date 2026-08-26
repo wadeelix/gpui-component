@@ -344,6 +344,9 @@ pub struct InputBaseState<M: InputModeKind> {
     /// container and would otherwise take every click before the widget could,
     /// leaving a checkbox that draws correctly but never toggles.
     pub(super) widget_hitboxes: RefCell<Vec<Bounds<Pixels>>>,
+    /// Where each cell of each drawn table landed, and which bytes it stands
+    /// for. A click inside a grid is resolved against these.
+    pub(super) cell_hitboxes: RefCell<Vec<crate::input::block_widget::CellHitbox>>,
     pub(super) editor_paddings: Edges<Pixels>,
     pub(super) editor_style: InputEditorStyle,
 
@@ -631,6 +634,7 @@ impl<M: InputModeKind> InputBaseState<M> {
             scroll_size: gpui::size(px(0.), px(0.)),
             editor_scrollbar_snapshot: Cell::new(None),
             widget_hitboxes: RefCell::new(Vec::new()),
+            cell_hitboxes: RefCell::new(Vec::new()),
             editor_paddings: Edges::default(),
             deferred_scroll_offset: None,
             preferred_column: None,
@@ -2191,6 +2195,19 @@ impl<M: InputModeKind> InputBaseState<M> {
         // If the text is empty, always return 0
         if self.text.len() == 0 {
             return 0;
+        }
+
+        // A drawn table stands in for lines that shape to nothing, so a click
+        // inside one has to be answered by the grid: resolving it against those
+        // lines puts the caret at the start of a row wherever it landed, which
+        // is what made a table impossible to aim at.
+        if let Some(hit) = self
+            .cell_hitboxes
+            .borrow()
+            .iter()
+            .find(|hit| hit.bounds.contains(&position))
+        {
+            return hit.range.start;
         }
 
         let (Some(bounds), Some(last_layout)) =
