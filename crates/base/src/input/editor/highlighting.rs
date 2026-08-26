@@ -207,8 +207,9 @@ pub type InputHighlighterFactory = Rc<dyn Fn(&str) -> Option<Box<dyn InputHighli
 pub type SharedHighlightStyleResolver = Arc<dyn HighlightStyleResolver>;
 pub type FoldIconRenderer = Rc<dyn Fn(usize, bool) -> AnyElement>;
 
-/// Draws the cell of a table widget that is being edited, given the byte range
-/// of its text.
+/// Draws the cell of a table widget that is being edited, given its position
+/// in the table -- row (0 = header, 1.. = body) and column -- and the byte
+/// range of its text.
 ///
 /// The same shape as [`FoldIconRenderer`], and for the same reason: a widget is
 /// built during `prepaint`, where the engine cannot create an entity, but an
@@ -216,8 +217,14 @@ pub type FoldIconRenderer = Rc<dyn Fn(usize, bool) -> AnyElement>;
 /// That is what lets a table keep its grid while one cell is edited in place --
 /// the editor for the cell belongs to the application, not to this crate.
 ///
+/// **The position is what identifies the cell, not the range.** The caller
+/// parses the table itself, and two parsers agree on how many cells a row has
+/// long before they agree on the exact bytes each one spans -- padding alone
+/// separates them. Matching on the range made the editor vanish the moment the
+/// two disagreed, which handed the keystroke to the document instead.
+///
 /// Returning `None` leaves the cell drawn as ordinary text.
-pub type TableCellRenderer = Rc<dyn Fn(&Range<usize>) -> Option<AnyElement>>;
+pub type TableCellRenderer = Rc<dyn Fn(usize, usize, &Range<usize>) -> Option<AnyElement>>;
 
 #[derive(Clone, Copy, Default)]
 pub struct DiagnosticColors {

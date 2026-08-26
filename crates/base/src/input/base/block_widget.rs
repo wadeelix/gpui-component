@@ -56,7 +56,7 @@ pub(super) fn render_block_widget(
         crate::input::ColumnAlign::Right => TextAlign::Right,
     };
 
-    let cell = |one: &crate::input::TableCell, column: usize, is_header: bool| {
+    let cell = |one: &crate::input::TableCell, row: usize, column: usize, is_header: bool| {
         // Only horizontal padding: a row has to be exactly as tall as the
         // buffer line it stands in for, or the grid outgrows the rows reserved
         // for it and the prose after the table is drawn over.
@@ -72,22 +72,27 @@ pub(super) fn render_block_widget(
             container
         };
         // The application may own an editor for the cell being edited. It is
-        // asked by byte range rather than by row and column, so the widget
-        // never has to agree with it about how a table is numbered.
+        // asked by position: the application parses the table too, and two
+        // parsers agree on a row and a column long before they agree on the
+        // exact bytes a cell spans. Asking by range made the cell's editor
+        // vanish the moment they differed by a space, and the keystroke went
+        // to the document instead.
         match style
             .table_cell_renderer
             .as_ref()
-            .and_then(|render| render(&one.range))
+            .and_then(|render| render(row, column, &one.range))
         {
             Some(editor) => container.child(editor),
             None => container.child(SharedString::from(one.text.clone())),
         }
     };
 
-    let row = |cells: &Vec<crate::input::TableCell>, is_header: bool| {
+    // `row` counts the way the application does: 0 is the header, 1.. are body
+    // rows, and the delimiter is scaffolding with no cells of its own.
+    let row = |cells: &Vec<crate::input::TableCell>, row_ix: usize, is_header: bool| {
         let mut line = gpui::div().flex().flex_row().w_full().h(row_height);
         for (column, one) in cells.iter().enumerate() {
-            line = line.child(cell(one, column, is_header));
+            line = line.child(cell(one, row_ix, column, is_header));
         }
         line
     };
@@ -115,10 +120,10 @@ pub(super) fn render_block_widget(
         .w_full();
     for ix in rows_shown {
         grid = match ix {
-            0 => grid.child(row(header, true).into_any_element()),
+            0 => grid.child(row(header, 0, true).into_any_element()),
             1 => grid.child(rule().into_any_element()),
             _ => match rows.get(ix - 2) {
-                Some(cells) => grid.child(row(cells, false).into_any_element()),
+                Some(cells) => grid.child(row(cells, ix - 1, false).into_any_element()),
                 None => grid,
             },
         };

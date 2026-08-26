@@ -316,16 +316,21 @@ impl Input {
         self
     }
 
-    /// Draws the table cell whose text occupies the given byte range, so a
-    /// table can keep its grid while one cell is edited in place.
+    /// Draws the table cell at the given row (0 = header, 1.. = body) and
+    /// column, so a table can keep its grid while one cell is edited in place.
+    /// The cell's byte range comes with it, for a caller that wants the bytes.
     ///
     /// The element belongs to the caller -- typically one built around an
     /// editor entity it owns -- because a block widget is assembled during
     /// `prepaint`, where no entity can be created. Returning `None` leaves the
     /// cell drawn as ordinary text.
+    ///
+    /// Identify the cell by its position rather than by its range: the caller
+    /// parses the table too, and two parsers agree on a row and a column long
+    /// before they agree on which bytes a cell spans.
     pub fn table_cell(
         mut self,
-        f: impl Fn(&std::ops::Range<usize>) -> Option<gpui::AnyElement> + 'static,
+        f: impl Fn(usize, usize, &std::ops::Range<usize>) -> Option<gpui::AnyElement> + 'static,
     ) -> Self {
         self.table_cell_renderer = Some(Rc::new(f));
         self

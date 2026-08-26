@@ -109,12 +109,12 @@ impl Editor {
         self
     }
 
-    /// Draws the table cell whose text occupies the given byte range, so a
-    /// table can keep its grid while one cell is edited in place. See
+    /// Draws the table cell at the given row and column, so a table can keep
+    /// its grid while one cell is edited in place. See
     /// [`super::Input::table_cell`].
     pub fn table_cell(
         mut self,
-        f: impl Fn(&std::ops::Range<usize>) -> Option<gpui::AnyElement> + 'static,
+        f: impl Fn(usize, usize, &std::ops::Range<usize>) -> Option<gpui::AnyElement> + 'static,
     ) -> Self {
         self.table_cell_renderer = Some(Rc::new(f));
         self
@@ -150,7 +150,7 @@ impl RenderOnce for Editor {
                 this.context_menu(move |menu, window, cx| build(menu, window, cx))
             })
             .when_some(self.table_cell_renderer, |this, render| {
-                this.table_cell(move |range| render(range))
+                this.table_cell(move |row, column, range| render(row, column, range))
             })
             .refine_style(&self.style)
     }
