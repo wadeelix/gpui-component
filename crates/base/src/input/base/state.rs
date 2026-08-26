@@ -3334,6 +3334,78 @@ mod tests {
         );
     }
 
+    /// Spike for cell-level table reveal (`docs/specs/tables/`, step 3.0).
+    ///
+    /// The route chosen there hosts a nested input for the focused cell and
+    /// writes its value back into the document. The question that decides the
+    /// route is undo: a nested editor keeping its own history would make Ctrl+Z
+    /// behave differently inside a table than outside it, which is a user-data
+    /// question rather than a polish one.
+    ///
+    /// This asserts the write-back is one step by construction -- `replace`
+    /// marks the edit `EditIntent::Atomic`, so a whole cell edit collapses into
+    /// a single undo whatever the nested editor did to reach that value.
+    #[gpui::test]
+    fn a_cell_written_back_into_the_document_is_one_undo_step(cx: &mut TestAppContext) {
+        let document = "| a | b |\n|---|---|\n| 1 | 2 |";
+        let view = InputView::<EditorMode>::new(cx);
+        let mut cx = VisualTestContext::from_window(view.window_handle.into(), cx);
+        let parent = view.input;
+
+        cx.update(|window, cx| {
+            parent.update(cx, |state, cx| {
+                state.set_value(document, window, cx);
+            })
+        });
+
+        // The nested editor the widget would host for the focused cell. It
+        // starts from the cell's text and is typed into freely.
+        let cell_range = document.find("| 1 |").unwrap() + 2..document.find("| 1 |").unwrap() + 3;
+        assert_eq!(&document[cell_range.clone()], "1");
+
+        let nested = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut state = InputBaseState::<EditorMode>::new(window, cx);
+                state.set_value("1", window, cx);
+                state
+            })
+        });
+        cx.update(|window, cx| {
+            nested.update(cx, |state, cx| {
+                state.set_selected_range((1..1).into(), cx);
+                state.replace("111", window, cx);
+                state.replace("1111", window, cx);
+            })
+        });
+        let edited = cx.update(|_, cx| nested.read(cx).text().to_string());
+
+        // The widget writes the cell's value back through the parent's own
+        // `replace`, over the cell's byte range.
+        cx.update(|window, cx| {
+            parent.update(cx, |state, cx| {
+                state.set_selected_range(cell_range.clone().into(), cx);
+                state.replace(edited.clone(), window, cx);
+            })
+        });
+        let after = cx.update(|_, cx| parent.read(cx).text().to_string());
+        assert!(
+            after.contains(&format!("| {edited} |")),
+            "the cell's value reached the document: {after:?}"
+        );
+
+        // One undo, however many keystrokes went into the cell.
+        cx.update(|window, cx| {
+            parent.update(cx, |state, cx| {
+                state.undo_once(window, cx);
+            })
+        });
+        assert_eq!(
+            cx.update(|_, cx| parent.read(cx).text().to_string()),
+            document,
+            "one undo restored the document, so a cell edit is one step"
+        );
+    }
+
     #[gpui::test]
     fn context_menu_handler_is_deferred_and_respects_disabled(cx: &mut TestAppContext) {
         use std::{cell::Cell, rc::Rc};
