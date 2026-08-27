@@ -1800,8 +1800,14 @@ impl<M: InputModeKind> InputBaseState<M> {
             return;
         }
 
-        // Show diagnostic popover on mouse move
-        let offset = self.index_for_mouse_position(event.position);
+        // A move with the button down is a drag, and this is the handler that
+        // carries it: `self.selecting` is what tells the two apart. While one
+        // is running the table is ordinary text, or the selection collapses
+        // into whichever cell the pointer crossed and stops there.
+        let offset = match self.selecting {
+            true => self.index_for_drag_position(event.position),
+            false => self.index_for_mouse_position(event.position),
+        };
         M::on_mouse_move(self, offset, event, window, cx);
 
         if self.is_code_editor() {
