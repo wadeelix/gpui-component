@@ -794,10 +794,22 @@ impl<M: InputModeKind> TextElement<M> {
                 // them, so fill the row: the selection is the only feedback
                 // about what a copy will yield.
                 let shapes_to_nothing = line.display_len() == 0;
-                let spans_this_line =
-                    start_ix <= prev_lines_offset && end_ix >= prev_lines_offset + line.len();
-
-                if shapes_to_nothing && spans_this_line {
+                // A line standing in for a widget has no glyphs to measure, so
+                // both of its ends report the same x whatever the selection
+                // covers. Filling it only when the range spans the whole line
+                // left every partial selection through a table drawn as a
+                // sliver -- and `select all`, which does span, looked fine.
+                //
+                // The row is filled from where the selection enters the line to
+                // where it leaves: the ends are the line's own when the range
+                // reaches past them, and the content edges otherwise.
+                // A selection that reaches past either end of the line covers
+                // bytes a copy will take, so the row is filled to show it. Only
+                // a range that begins and ends inside one such line names no
+                // column at all, and a sliver is the honest answer there.
+                let reaches_past_an_end =
+                    start_ix <= prev_lines_offset || end_ix >= prev_lines_offset + line.len();
+                if shapes_to_nothing && reaches_past_an_end {
                     end_x = last_layout.content_width;
                 } else {
                     // Ensure at least 6px width for the selection for empty lines.
