@@ -2192,6 +2192,20 @@ impl<M: InputModeKind> InputBaseState<M> {
     }
 
     pub(crate) fn index_for_mouse_position(&self, position: Point<Pixels>) -> usize {
+        self.index_for_mouse_position_inner(position, true)
+    }
+
+    /// The offset a drag through `position` names.
+    ///
+    /// A drag is a sweep across the document, so a table is ordinary text while
+    /// it is happening: consulting the cell boxes would collapse the selection
+    /// into whichever cell the pointer was over, which made a document holding
+    /// a table impossible to select with the mouse.
+    pub(crate) fn index_for_drag_position(&self, position: Point<Pixels>) -> usize {
+        self.index_for_mouse_position_inner(position, false)
+    }
+
+    fn index_for_mouse_position_inner(&self, position: Point<Pixels>, aim_at_cell: bool) -> usize {
         // If the text is empty, always return 0
         if self.text.len() == 0 {
             return 0;
@@ -2201,11 +2215,12 @@ impl<M: InputModeKind> InputBaseState<M> {
         // inside one has to be answered by the grid: resolving it against those
         // lines puts the caret at the start of a row wherever it landed, which
         // is what made a table impossible to aim at.
-        if let Some(hit) = self
-            .cell_hitboxes
-            .borrow()
-            .iter()
-            .find(|hit| hit.bounds.contains(&position))
+        if aim_at_cell
+            && let Some(hit) = self
+                .cell_hitboxes
+                .borrow()
+                .iter()
+                .find(|hit| hit.bounds.contains(&position))
         {
             // Where in the cell's text the click landed, not merely which cell:
             // answering with the cell's start put the caret against the left
@@ -2504,7 +2519,7 @@ impl<M: InputModeKind> InputBaseState<M> {
         }
 
         self.auto_scroll.last_drag_position = Some(event.position);
-        let offset = self.index_for_mouse_position(event.position);
+        let offset = self.index_for_drag_position(event.position);
         self.select_to(offset, cx);
 
         if !self.is_single_line() {
