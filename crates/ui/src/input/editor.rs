@@ -116,7 +116,13 @@ impl Editor {
     /// [`super::Input::table_cell`].
     pub fn table_cell(
         mut self,
-        f: impl Fn(usize, usize, &std::ops::Range<usize>) -> Option<gpui::AnyElement> + 'static,
+        f: impl Fn(
+            &std::ops::Range<usize>,
+            usize,
+            usize,
+            &std::ops::Range<usize>,
+        ) -> Option<gpui::AnyElement>
+        + 'static,
     ) -> Self {
         self.table_cell_renderer = Some(Rc::new(f));
         self
@@ -164,7 +170,7 @@ impl RenderOnce for Editor {
                 this.context_menu(move |menu, window, cx| build(menu, window, cx))
             })
             .when_some(self.table_cell_renderer, |this, render| {
-                this.table_cell(move |row, column, range| render(row, column, range))
+                this.table_cell(move |table, row, column, range| render(table, row, column, range))
             })
             .refine_style(&self.style)
     }

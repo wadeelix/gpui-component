@@ -54,6 +54,9 @@ pub(super) fn render_block_widget(
         rows,
         aligns,
     } = &widget.kind;
+    // Which table this is. Two tables in one note both have a cell (1, 2), and
+    // without this the application opened its editor in each of them.
+    let table_range = &widget.range;
 
     let align_of = |column: usize| match aligns.get(column).copied().unwrap_or_default() {
         crate::input::ColumnAlign::Left => TextAlign::Left,
@@ -107,7 +110,7 @@ pub(super) fn render_block_widget(
         match style
             .table_cell_renderer
             .as_ref()
-            .and_then(|render| render(row, column, &one.range))
+            .and_then(|render| render(table_range, row, column, &one.range))
         {
             Some(editor) => container.child(editor),
             None => container.child(SharedString::from(one.text.clone())),

@@ -330,7 +330,13 @@ impl Input {
     /// before they agree on which bytes a cell spans.
     pub fn table_cell(
         mut self,
-        f: impl Fn(usize, usize, &std::ops::Range<usize>) -> Option<gpui::AnyElement> + 'static,
+        f: impl Fn(
+            &std::ops::Range<usize>,
+            usize,
+            usize,
+            &std::ops::Range<usize>,
+        ) -> Option<gpui::AnyElement>
+        + 'static,
     ) -> Self {
         self.table_cell_renderer = Some(Rc::new(f));
         self

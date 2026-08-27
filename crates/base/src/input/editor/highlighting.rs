@@ -224,7 +224,8 @@ pub type FoldIconRenderer = Rc<dyn Fn(usize, bool) -> AnyElement>;
 /// two disagreed, which handed the keystroke to the document instead.
 ///
 /// Returning `None` leaves the cell drawn as ordinary text.
-pub type TableCellRenderer = Rc<dyn Fn(usize, usize, &Range<usize>) -> Option<AnyElement>>;
+pub type TableCellRenderer =
+    Rc<dyn Fn(&Range<usize>, usize, usize, &Range<usize>) -> Option<AnyElement>>;
 
 #[derive(Clone, Copy, Default)]
 pub struct DiagnosticColors {
