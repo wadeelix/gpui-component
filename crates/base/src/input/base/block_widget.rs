@@ -541,6 +541,26 @@ mod tests {
         );
     }
 
+    /// A drag sweeping through a table takes the row it is over.
+    ///
+    /// The lines a widget stands in for are shaped empty, so resolving a point
+    /// inside a table against them answers with the table's first byte: a
+    /// selection dragged into a table stopped there and went no further,
+    /// whatever the pointer did next.
+    #[test]
+    fn a_drag_through_a_cell_takes_the_row_it_is_over() {
+        let hit = CellHitbox {
+            bounds: gpui::Bounds::new(point(px(0.), px(20.)), gpui::size(px(100.), px(20.)).into()),
+            range: 40..48,
+            text_left: CELL_PADDING_X,
+            shaped: None,
+        };
+        // Aiming (a click) answers within the cell; sweeping (a drag) answers
+        // with its end, so the rows above the pointer are taken in.
+        assert_eq!(hit.offset_for(point(px(50.), px(25.))), 40);
+        assert_eq!(hit.range.end, 48);
+    }
+
     /// A table scrolled partly off the top draws from the row it resumes at,
     /// and the boxes have to follow -- or a click would name a cell that is
     /// not where the reader sees it.

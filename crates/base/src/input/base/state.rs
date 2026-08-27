@@ -2221,17 +2221,27 @@ impl<M: InputModeKind> InputBaseState<M> {
         // inside one has to be answered by the grid: resolving it against those
         // lines puts the caret at the start of a row wherever it landed, which
         // is what made a table impossible to aim at.
-        if aim_at_cell
-            && let Some(hit) = self
-                .cell_hitboxes
-                .borrow()
-                .iter()
-                .find(|hit| hit.bounds.contains(&position))
+        if let Some(hit) = self
+            .cell_hitboxes
+            .borrow()
+            .iter()
+            .find(|hit| hit.bounds.contains(&position))
         {
-            // Where in the cell's text the click landed, not merely which cell:
-            // answering with the cell's start put the caret against the left
-            // border wherever the reader aimed.
-            return hit.offset_for(position);
+            return if aim_at_cell {
+                // Where in the cell's text the click landed, not merely which
+                // cell: answering with the cell's start put the caret against
+                // the left border wherever the reader aimed.
+                hit.offset_for(position)
+            } else {
+                // A drag sweeps rather than aims, so it wants the row the
+                // pointer is over -- the end of the cell it is in, so the rows
+                // above it are taken in and the ones below are not. Falling
+                // through to the shaped lines cannot answer this: the lines a
+                // widget stands in for are shaped empty, so every point inside
+                // a table resolves to the table's first byte, and a selection
+                // stopped dead there.
+                hit.range.end
+            };
         }
 
         let (Some(bounds), Some(last_layout)) =
