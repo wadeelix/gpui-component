@@ -2530,7 +2530,9 @@ impl<M: InputModeKind> InputBaseState<M> {
                 let current = state.scroll_handle.offset();
                 state.update_scroll_offset(Some(point(current.x, current.y + delta)), cx);
                 if let Some(pos) = state.auto_scroll.last_drag_position {
-                    let offset = state.index_for_mouse_position(pos);
+                    // Still a drag, so still ordinary text: see
+                    // `index_for_drag_position`.
+                    let offset = state.index_for_drag_position(pos);
                     state.select_to(offset, cx);
                 }
             });
