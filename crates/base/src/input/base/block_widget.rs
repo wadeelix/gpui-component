@@ -411,8 +411,19 @@ fn cell_hitboxes(
     // Rows can differ in height once a cell wraps, so their tops are summed
     // rather than multiplied -- the boxes must land where the grid drew them.
     let mut top = origin.y;
+    let bottom = origin.y + height;
     for row_ix in rows_skipped..rows_skipped + rows_shown {
-        let this_height = height_of(row_ix);
+        // A row that starts at or past the widget's last pixel is not drawn,
+        // and a box for it would cover whatever the document put there: the
+        // blank line under a table, where a click then typed a cell's text
+        // outside the table and broke it.
+        if top >= bottom {
+            break;
+        }
+        // Nor may a box reach past the widget, however tall its line claims to
+        // be: the line heights include wrapped rows, and their sum can exceed
+        // the room the widget was actually given.
+        let this_height = height_of(row_ix).min(bottom - top);
         // Row 0 is the header, row 1 the rule under it, and the body follows.
         let cells = match row_ix {
             0 => header,
@@ -428,9 +439,6 @@ fn cell_hitboxes(
                 }
             },
         };
-        if top + this_height > origin.y + height {
-            break;
-        }
         for (column, cell) in cells.iter().enumerate() {
             let left = origin.x + column_width * column as f32;
             // The same text, shaped the way the cell drew it, so a click's x
