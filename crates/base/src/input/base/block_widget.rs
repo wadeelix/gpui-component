@@ -57,21 +57,27 @@ pub(super) fn render_block_widget(
     };
 
     let cell = |text: &String, column: usize, is_header: bool| {
-        // Only horizontal padding: a row has to be exactly as tall as the
-        // buffer line it stands in for, or the grid outgrows the rows reserved
-        // for it and the prose after the table is drawn over.
-        // The row is as tall as the buffer line it stands for, and that line
-        // wraps when a cell holds more than fits across -- so the cell wraps
-        // with it. Clipping instead made a cell's text disappear from view
-        // while the document still held every character of it.
+        // A row is exactly as tall as the buffer line it stands in for: the
+        // engine reserved that much and no more, so anything taller is drawn
+        // over whatever follows the table.
         //
-        // `min_w_0` is what makes it wrap rather than grow: a flex item's
-        // minimum size is its content by default, so a long cell pushed the
-        // columns beside it off the table instead of folding its own text.
+        // `min_w_0` keeps a long cell from growing sideways -- a flex item's
+        // minimum size is its content by default, so without it one long cell
+        // pushes the columns beside it off the table. It wraps instead, and
+        // `overflow_hidden` keeps the wrapped remainder inside the row rather
+        // than letting it spill onto the line below.
+        //
+        // Text can therefore be cut off, which is the honest trade for a grid
+        // that cannot choose its own height: the document still holds every
+        // character, the reading pane shows them all, and clicking the table
+        // drops it back to source. A row that silently overlapped the next one
+        // was worse -- it corrupted the display of text that was not part of
+        // the table at all.
         let cell = gpui::div()
             .flex_1()
             .min_w_0()
             .h(row_height)
+            .overflow_hidden()
             .px(px(6.))
             .text_align(align_of(column));
         let cell = if is_header {
@@ -110,7 +116,12 @@ pub(super) fn render_block_widget(
         .id(("block-table", line_index))
         .flex()
         .flex_col()
-        .w_full();
+        .w_full()
+        // The box the engine prepaints this into is exactly the rows it
+        // reserved. Clipping to it means a grid that wants more room loses its
+        // last rows rather than drawing them over the prose after the table.
+        .h_full()
+        .overflow_hidden();
     for ix in rows_shown {
         grid = match ix {
             0 => grid.child(row(header, true).into_any_element()),
