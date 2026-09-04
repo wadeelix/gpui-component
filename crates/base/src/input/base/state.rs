@@ -750,13 +750,13 @@ impl<M: InputModeKind> InputBaseState<M> {
         // extra room leaves the text under it its own size.
         let scale: LineHeightScale = {
             let highlighter = highlighter.clone();
-            Rc::new(move |range: &Range<usize>, text: &Rope| {
+            Rc::new(move |range: &Range<usize>, text: &Rope, generation: u64| {
                 highlighter
                     .borrow()
                     .as_ref()
                     .map(|highlighter| {
                         highlighter.line_font_scale(range)
-                            * highlighter.line_height_scale(range, text)
+                            * highlighter.line_height_scale(range, text, generation)
                     })
                     .unwrap_or(1.0)
             })

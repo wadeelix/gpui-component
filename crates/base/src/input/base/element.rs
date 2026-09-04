@@ -1877,7 +1877,11 @@ impl<M: InputModeKind> TextElement<M> {
                 if let Some((focused, start, end)) = focused
                     && focused == c
                 {
-                    content = start.min(content.start)..end.max(content.end);
+                    // From the wrapped rows, which are clamped to the line,
+                    // not from the reported span, which may not be.
+                    let first = rows.first().map_or(content.start, |r| r.start);
+                    let last = rows.last().map_or(content.end, |r| r.end);
+                    content = start.min(first)..end.max(last);
                     if let Some(first) = rows.first_mut() {
                         first.start = content.start;
                     }

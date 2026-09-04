@@ -107,12 +107,13 @@ pub trait InputHighlighter {
     /// A table row's height is its cells' wrap rows times this, so a value
     /// under `1.0` collapses a row of nothing (a delimiter row) to a rule.
     ///
-    /// Asked at wrap time with `text` as it will be after the edit, like
-    /// `table_row`: the highlighter's own text is one edit behind here.
+    /// Asked at wrap time with `text` as it will be after the edit and the
+    /// same `generation` `table_row` gets, so what it parses it can share:
+    /// the highlighter's own text is one edit behind here.
     ///
     /// Default: `1.0` (the line takes the room its text needs).
-    fn line_height_scale(&self, line_range: &Range<usize>, text: &Rope) -> f32 {
-        let _ = (line_range, text);
+    fn line_height_scale(&self, line_range: &Range<usize>, text: &Rope, generation: u64) -> f32 {
+        let _ = (line_range, text, generation);
         1.0
     }
 
