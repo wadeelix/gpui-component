@@ -752,12 +752,14 @@ impl TextWrapper {
                 let answer = self.ask_table_row(&line_range, changed_text);
                 plan.answers.insert(row, answer);
             }
+            let (mut next_lo, mut next_hi) = (lo, hi);
             for row in lo..=hi {
                 if let Some(Some(table_row)) = plan.answers.get(&row) {
-                    lo = lo.min(table_row.first_row);
-                    hi = hi.max(table_row.last_row.min(new_count.saturating_sub(1)));
+                    next_lo = next_lo.min(table_row.first_row);
+                    next_hi = next_hi.max(table_row.last_row.min(new_count.saturating_sub(1)));
                 }
             }
+            (lo, hi) = (next_lo, next_hi);
             if (lo, hi) == (before_lo, before_hi) {
                 break;
             }

@@ -383,9 +383,7 @@ pub(super) fn empty_bottom_height(
     }
 }
 
-/// Layout information for fold icons.
 /// One prepainted inline widget, ready to paint.
-
 pub(super) struct InlineWidgetLayout {
     pub(super) element: gpui::AnyElement,
 }
@@ -1470,7 +1468,6 @@ impl<M: InputModeKind> TextElement<M> {
     /// cannot be created during paint. Each widget is anchored with
     /// `position_for_index`, so it follows concealment and per-line font size
     /// without knowing about either.
-
     fn layout_inline_widgets(
         &self,
         bounds: &Bounds<Pixels>,
