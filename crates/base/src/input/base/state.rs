@@ -2336,7 +2336,11 @@ impl<M: InputModeKind> InputBaseState<M> {
                         &last_layout.lines[vi - 1],
                         y_offset - last_layout.lines[vi - 1].size(line_height).height,
                     );
-                    let prev_pos = point(pos.x, inner_position.y - prev_origin_y - px(0.5));
+                    let prev_height = prev_layout.size(line_height).height;
+                    let prev_pos = point(
+                        pos.x,
+                        (inner_position.y - prev_origin_y).min(prev_height - px(0.5)),
+                    );
                     let local_index = prev_layout
                         .closest_index_for_position(prev_pos, last_layout)
                         .unwrap_or_else(|| prev_layout.len());
