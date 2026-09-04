@@ -82,6 +82,10 @@ pub(crate) struct TableRowLayout {
     /// Whether this is the table's first row, which draws the top rule; every
     /// row draws its own bottom rule.
     pub(crate) first: bool,
+    /// A delimiter row collapsed to a sliver under the header's rule by the
+    /// application's height hook: not a place for the mouse or the caret,
+    /// and nothing to draw but that rule.
+    pub(crate) collapsed: bool,
     pub(crate) chrome: TableChrome,
 }
 
@@ -194,11 +198,8 @@ impl TableRowLayout {
         k.min(cell.rows.len().saturating_sub(1))
     }
 
-    /// Whether this is a delimiter row collapsed to a sliver under the
-    /// header's rule by the application's height hook: not a place for the
-    /// mouse, and nothing to draw but that rule.
-    fn collapsed(&self) -> bool {
-        self.kind == TableRowKind::Delimiter && self.text_row_height < px(4.)
+    pub(crate) fn collapsed(&self) -> bool {
+        self.collapsed
     }
 
     /// The offset nearest to `pos`, for any point inside the row's height;
@@ -502,6 +503,7 @@ mod tests {
             len: 12,
             focused: None,
             first: false,
+            collapsed: false,
             chrome: TableChrome {
                 border: Hsla::default(),
                 header_background: Hsla::default(),

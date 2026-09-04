@@ -1937,6 +1937,10 @@ impl<M: InputModeKind> TextElement<M> {
             len: line_text.len(),
             focused: focused.map(|(cell, _, _)| cell),
             first: !neighbour_is_table(buffer_line.checked_sub(1)),
+            // Under half a line the application meant a sliver, whatever
+            // the font size.
+            collapsed: item.kind == TableRowKind::Delimiter
+                && text_row_height * (rows as f32) < last_layout.line_height / 2.,
             chrome: TableChrome {
                 border: style.border,
                 header_background: style.muted_foreground.opacity(0.08),

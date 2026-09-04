@@ -1017,7 +1017,22 @@ impl<M: InputModeKind> InputBaseState<M> {
             this.undo_manager.pending_intent = Some(EditIntent::Atomic);
             let range = 0..this.text.chars().map(|c| c.len_utf16()).sum();
             this.replace_text_in_range_silent(Some(range), &text, window, cx);
+            // A fresh highlighter for the new document, made now rather than
+            // at the next render: a line rebuilt in between (an application
+            // re-laying a row out after the change) would find none and lose
+            // what the highlighter decides -- a table row laid out as prose.
             this.reset_highlighter(cx);
+            this.mode.update_highlighter::<M>(
+                super::mode::HighlighterUpdate {
+                    selected_range: &(0..0),
+                    old_text: &this.text,
+                    new_text: &this.text,
+                    change_text: "",
+                    force: false,
+                },
+                window,
+                cx,
+            );
         });
     }
 
@@ -2305,6 +2320,37 @@ impl<M: InputModeKind> InputBaseState<M> {
                 };
             }
 
+            let height = line_layout.size(line_height).height;
+            let collapsed = line_layout
+                .table
+                .as_ref()
+                .is_some_and(|table| table.collapsed());
+
+            // A collapsed table row takes no click: the pointer on it belongs
+            // to the line above (its rule), or to the line below when there
+            // is none above; above the visible top, to the line below.
+            if collapsed {
+                if pos.y >= px(0.) && pos.y < height && vi > 0 {
+                    let (prev_offset, prev_layout, prev_origin_y) = (
+                        last_layout.visible_line_byte_offsets[vi - 1],
+                        &last_layout.lines[vi - 1],
+                        y_offset - last_layout.lines[vi - 1].size(line_height).height,
+                    );
+                    let prev_pos = point(pos.x, inner_position.y - prev_origin_y - px(0.5));
+                    let local_index = prev_layout
+                        .closest_index_for_position(prev_pos, last_layout)
+                        .unwrap_or_else(|| prev_layout.len());
+                    let index = prev_offset + local_index;
+                    return if self.masked {
+                        self.text.char_index_to_offset(index / MASK_CHAR.len_utf8())
+                    } else {
+                        index.min(self.text.len())
+                    };
+                }
+                y_offset += height;
+                continue;
+            }
+
             // Check if mouse is in this line's bounds
             if let Some(local_index) = line_layout.closest_index_for_position(pos, last_layout) {
                 let index = line_start_offset + local_index;
@@ -2314,9 +2360,9 @@ impl<M: InputModeKind> InputBaseState<M> {
                     index.min(self.text.len())
                 };
             } else if pos.y < px(0.) {
-                // Mouse is above this line (above the visible top, or on a
-                // collapsed table row that takes no click): the offset under
-                // the same x on this line's first row, or its start.
+                // Mouse is above this line (above the visible top, or past a
+                // collapsed table row): the offset under the same x on this
+                // line's first row, or its start.
                 let local_index = line_layout
                     .closest_index_for_position(point(pos.x, px(0.)), last_layout)
                     .unwrap_or(0);
@@ -2328,7 +2374,7 @@ impl<M: InputModeKind> InputBaseState<M> {
                 };
             }
 
-            y_offset += line_layout.size(line_height).height;
+            y_offset += height;
         }
 
         // Mouse is below all visible lines, return end of text
@@ -2369,9 +2415,9 @@ impl<M: InputModeKind> InputBaseState<M> {
                 self.selected_range.end = word_range.end;
             }
         }
-        if self.selected_range.is_empty() {
-            self.update_preferred_column();
-        }
+        // The head's column is the goal for a vertical selection that
+        // follows; the vertical moves restore their own goal after this.
+        self.update_preferred_column();
         cx.notify()
     }
 
@@ -5377,9 +5423,13 @@ mod tests {
         cx.simulate_resize(gpui::size(px(320.), px(600.)));
         cx.run_until_parked();
         draw(&mut cx);
-        // Prose first: from the third glyph of `prose one`, Shift+Down
-        // selects to the third glyph of the header row's line.
+        // Prose first: from the third glyph of `prose one`, two Shift+Right
+        // then Shift+Down selects into the header row at the head's x, not
+        // the anchor's: glyph 5 lies past the first cell's two glyphs, so the
+        // head lands at that cell's end (`ab|`), where glyph 3 would not.
         cx.update(|_, cx| input.update(cx, |state, cx| state.set_selected_range(3..3, cx)));
+        cx.simulate_keystrokes("shift-right");
+        cx.simulate_keystrokes("shift-right");
         cx.simulate_keystrokes("shift-down");
         cx.run_until_parked();
         let header = TABLE_DOC.find('|').unwrap();
@@ -5387,10 +5437,7 @@ mod tests {
             input.read_with(cx, |state, _| {
                 let range = state.selected_range();
                 assert_eq!(range.start, 3, "the anchor stays");
-                assert!(
-                    range.end > header && range.end < header + 6,
-                    "the head is near the same x on the next line: {range:?}"
-                );
+                assert_eq!(range.end, header + 4, "the head keeps its x: {range:?}");
             })
         });
 

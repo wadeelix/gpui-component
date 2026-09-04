@@ -93,9 +93,31 @@ impl<M: InputModeKind> InputBaseState<M> {
                     .nearest_visible_display_row(display_point.row)
             });
         let max_display_row = self.display_map.display_row_count().saturating_sub(1);
-        let target_display_row = current_display_row
+        let mut target_display_row = current_display_row
             .saturating_add_signed(move_lines)
             .min(max_display_row);
+        // A collapsed table row (a delimiter row under the header's rule) is
+        // no place for the caret: step over it, as the eye does.
+        let step = move_lines.signum();
+        for _ in 0..2 {
+            let wrap_row = self
+                .display_map
+                .display_row_to_wrap_row(target_display_row)
+                .unwrap_or(display_point.row);
+            let mut probe = self.display_map.offset_to_wrap_display_point(offset);
+            probe.row = wrap_row;
+            probe.column = 0;
+            let buffer_row = self.display_map.wrap_display_point_to_point(probe).row;
+            let collapsed = last_layout
+                .line(buffer_row)
+                .and_then(|line| line.table.as_ref())
+                .is_some_and(|table| table.collapsed());
+            let next = target_display_row.saturating_add_signed(step);
+            if !collapsed || next > max_display_row || (step < 0 && target_display_row == 0) {
+                break;
+            }
+            target_display_row = next;
+        }
         let target_wrap_row = self
             .display_map
             .display_row_to_wrap_row(target_display_row)
