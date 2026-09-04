@@ -5485,6 +5485,40 @@ mod tests {
         });
     }
 
+    /// A double-click in a table cell selects a word of the cell, never the
+    /// padding and pipes around it: after the last word that word, in an
+    /// empty cell nothing.
+    #[gpui::test]
+    fn a_double_click_in_a_cell_selects_a_word_of_the_cell(cx: &mut TestAppContext) {
+        let doc = "prose\n| ab cd |   | ef |\n| --- | --- | --- |\n| g | h | i |\n";
+        let (mut cx, input) = table_editor(cx, doc);
+        let cd = doc.find("cd").unwrap();
+        let select = |cx: &mut VisualTestContext, offset: usize| {
+            cx.update(|window, cx| {
+                input.update(cx, |state, cx| state.select_word(offset, window, cx))
+            });
+            cx.update(|_, cx| input.read_with(cx, |state, _| state.selected_range()))
+        };
+        assert_eq!(select(&mut cx, cd), cd..cd + 2, "the word under the click");
+        assert_eq!(
+            select(&mut cx, cd + 2),
+            cd..cd + 2,
+            "after the cell's last word, that word"
+        );
+        let empty = doc.find("|   |").unwrap() + 2;
+        assert_eq!(
+            select(&mut cx, empty),
+            empty..empty,
+            "nothing in an empty cell"
+        );
+        let prose = doc.find("prose").unwrap();
+        assert_eq!(
+            select(&mut cx, prose + 1),
+            prose..prose + 5,
+            "prose is as before"
+        );
+    }
+
     /// The cell the last frame outlined on buffer line `row`.
     fn focused_cell(state: &InputBaseState<EditorMode>, row: usize) -> Option<usize> {
         let layout = state.last_layout.as_ref().expect("layout");

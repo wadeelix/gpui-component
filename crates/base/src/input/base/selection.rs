@@ -16,11 +16,62 @@ impl<M: InputModeKind> InputBaseState<M> {
         let Some(range) = TextSelector::word_range(&self.text, offset) else {
             return;
         };
+        let range = self.word_within_cell(offset, range);
 
         self.undo_manager.break_transaction_coalescing();
         self.selected_range = (range.start..range.end).into();
-        self.selected_word_range = Some(self.selected_range);
+        self.selected_word_range = (!range.is_empty()).then_some(self.selected_range);
         cx.notify()
+    }
+
+    /// A word double-clicked in a table cell stays inside the cell: the
+    /// text's run of padding spaces and pipes is not a word to the writer.
+    /// Past the cell's last word (the click landed after it) that word is
+    /// taken; in an empty cell nothing is, and the caret just lands.
+    fn word_within_cell(&self, offset: usize, range: Range<usize>) -> Range<usize> {
+        let Some(layout) = self.last_layout.as_ref() else {
+            return range;
+        };
+        let row = self.text.offset_to_point(offset.min(self.text.len())).row;
+        let Some(table) = layout.line(row).and_then(|line| line.table.as_ref()) else {
+            return range;
+        };
+        let line_start = self.text.line_start_offset(row);
+        let Some(local) = offset.checked_sub(line_start) else {
+            return range;
+        };
+        let (cell_ix, clamped) = table.cell_of(local);
+        let Some(cell) = table.cells.get(cell_ix) else {
+            return range;
+        };
+        let content = line_start + cell.content.start..line_start + cell.content.end;
+        let within = |r: Range<usize>| {
+            r.start.max(content.start)..r.end.min(content.end).max(r.start.max(content.start))
+        };
+        let inside = within(range);
+        if !inside.is_empty() || content.is_empty() {
+            return if inside.is_empty() {
+                let at = (line_start + clamped).clamp(content.start, content.end);
+                at..at
+            } else {
+                inside
+            };
+        }
+        // After the last word: the word ending at the content's end.
+        let last = self
+            .text
+            .clip_offset(content.end.saturating_sub(1), Bias::Left);
+        match TextSelector::word_range(&self.text, last) {
+            Some(word) => {
+                let word = within(word);
+                if word.is_empty() {
+                    content.end..content.end
+                } else {
+                    word
+                }
+            }
+            None => content.end..content.end,
+        }
     }
 
     /// Select the line at the given offset on triple-click.
