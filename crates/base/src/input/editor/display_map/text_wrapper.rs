@@ -888,6 +888,13 @@ impl LineLayout {
         self
     }
 
+    /// Paints what a table row draws under the selection; nothing for prose.
+    pub(crate) fn paint_background(&self, pos: Point<Pixels>, window: &mut Window) {
+        if let Some(table) = &self.table {
+            table.paint_background(pos, window);
+        }
+    }
+
     /// Height of the row the caret sits in: a text row inside a table row,
     /// the whole row otherwise.
     pub(crate) fn caret_row_height(&self, line_height: Pixels) -> Pixels {

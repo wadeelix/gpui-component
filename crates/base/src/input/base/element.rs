@@ -2682,6 +2682,18 @@ impl<M: InputModeKind> Element for TextElement<M> {
             }
         }
 
+        // Table row backgrounds, under the selection and the text: the
+        // selection is painted next and the text after it, so a background
+        // painted with the text would cover every selection in a table.
+        {
+            let mut y = origin.y + invisible_top_padding;
+            let x = origin.x + prepaint.last_layout.line_number_width;
+            for line in prepaint.last_layout.lines.iter() {
+                line.paint_background(point(x, y), window);
+                y += line.size(line_height).height;
+            }
+        }
+
         // Paint indent guides
         if let Some(path) = prepaint.indent_guides_path.take() {
             window.paint_path(path, editor_style.border.opacity(0.85));

@@ -322,7 +322,10 @@ impl TableRowLayout {
         vec![rect(left, px(0.), right.max(left + px(6.)), height)]
     }
 
-    pub(crate) fn paint(&self, origin: Point<Pixels>, window: &mut Window, cx: &mut App) {
+    /// The row's backgrounds: the header's tint and the revealed cell's.
+    /// Painted before the selection, which the engine paints before the
+    /// text; painted with the text they covered every selection in a table.
+    pub(crate) fn paint_background(&self, origin: Point<Pixels>, window: &mut Window) {
         let row_size = self.size();
         if self.kind == TableRowKind::Header {
             window.paint_quad(fill(
@@ -341,6 +344,12 @@ impl TableRowLayout {
                 self.chrome.focused_background,
             ));
         }
+    }
+
+    /// The row's text and chrome; see [`Self::paint_background`] for what
+    /// goes under the selection.
+    pub(crate) fn paint(&self, origin: Point<Pixels>, window: &mut Window, cx: &mut App) {
+        let row_size = self.size();
 
         for (cell_ix, cell) in self.cells.iter().enumerate() {
             let Some(column) = self.columns.get(cell_ix) else {

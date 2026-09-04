@@ -5392,6 +5392,40 @@ mod tests {
             });
         });
 
+        // A selection of the whole wrapped cell is drawn as one rectangle per
+        // text row of that cell, not as one sliver or one full-width band.
+        cx.update(|_, cx| {
+            input.read_with(cx, |state, _| {
+                let layout = state.last_layout.as_ref().unwrap();
+                let vi = layout
+                    .visible_buffer_lines
+                    .iter()
+                    .position(|&b| b == 3)
+                    .unwrap();
+                let table = layout.lines[vi].table.as_ref().unwrap();
+                let start = layout.visible_line_byte_offsets[vi] + table.cells[0].content.start;
+                let end = layout.visible_line_byte_offsets[vi] + table.cells[0].content.end;
+                let corners =
+                    crate::input::element::TextElement::<EditorMode>::match_range_corners(
+                        start..end,
+                        layout,
+                    )
+                    .expect("a selection path");
+                assert_eq!(corners.len(), table.rows, "one rectangle per text row");
+                let column_right = table.columns[0].x + table.columns[0].width;
+                for row in &corners {
+                    assert!(
+                        row.top_right.x <= column_right,
+                        "inside the column: {row:?}"
+                    );
+                    assert!(
+                        row.top_right.x > row.top_left.x + px(6.),
+                        "wider than a sliver"
+                    );
+                }
+            });
+        });
+
         // And the real keyboard path adds to it.
         cx.simulate_input("yy");
         draw(&mut cx);
