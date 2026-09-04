@@ -2327,7 +2327,11 @@ impl<M: InputModeKind> InputBaseState<M> {
     /// The offset is the UTF-8 offset.
     ///
     /// Ensure the offset use self.next_boundary or self.previous_boundary to get the correct offset.
-    pub(crate) fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+    ///
+    /// Public so an application can answer a selecting key itself (Shift+Home
+    /// inside a table cell selects to the cell's start, not the line's) while
+    /// keeping the selection's anchor where the engine has it.
+    pub fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         M::clear_inline_completion(self, cx);
 
         let offset = offset.clamp(0, self.text.len());
