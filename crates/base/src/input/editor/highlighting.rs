@@ -195,6 +195,10 @@ pub enum TableRowKind {
 /// between two known separators.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableCellSpan {
+    /// The byte after the separator opening the cell, or the line's start
+    /// for a first cell without a leading pipe. `start..separator` is the
+    /// cell's raw span: a selection anywhere in it is inside the cell.
+    pub start: usize,
     pub content: Range<usize>,
     pub separator: usize,
 }

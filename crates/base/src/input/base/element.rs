@@ -1847,16 +1847,45 @@ impl<M: InputModeKind> TextElement<M> {
             })
             .collect();
         let header = item.kind == TableRowKind::Header;
+
+        // The cell the selection lies inside, when both of its ends lie
+        // between its separators: the one the application reveals, outlined
+        // so the writer sees which. Its drawn text runs out to the selection
+        // when that sits in the padding -- after a space typed at the
+        // content's end -- so what was typed is drawn and the caret follows
+        // it, as in prose.
+        let selection = &state.selected_range;
+        let focused = selection
+            .start
+            .checked_sub(line_start)
+            .zip(selection.end.checked_sub(line_start))
+            .filter(|(_, end)| *end <= line_text.len())
+            .and_then(|(start, end)| {
+                item.cells
+                    .iter()
+                    .position(|span| span.start <= start && end <= span.separator)
+                    .map(|cell| (cell, start, end))
+            });
         let cells = item
             .cells
             .iter()
             .zip(item.cell_lines.iter())
             .enumerate()
-            .map(|(c, (span, rows))| CellLayout {
-                content: span.content.clone(),
-                separator: span.separator,
-                rows: rows.clone(),
-                lines: rows
+            .map(|(c, (span, rows))| {
+                let mut content = span.content.clone();
+                let mut rows = rows.clone();
+                if let Some((focused, start, end)) = focused
+                    && focused == c
+                {
+                    content = start.min(content.start)..end.max(content.end);
+                    if let Some(first) = rows.first_mut() {
+                        first.start = content.start;
+                    }
+                    if let Some(last) = rows.last_mut() {
+                        last.end = content.end;
+                    }
+                }
+                let lines = rows
                     .iter()
                     .map(|range| {
                         Self::shape_wrapped_range(
@@ -1872,8 +1901,14 @@ impl<M: InputModeKind> TextElement<M> {
                             window,
                         )
                     })
-                    .collect(),
-                align: item.aligns.get(c).copied().unwrap_or_default(),
+                    .collect();
+                CellLayout {
+                    content,
+                    separator: span.separator,
+                    rows,
+                    lines,
+                    align: item.aligns.get(c).copied().unwrap_or_default(),
+                }
             })
             .collect();
 
@@ -1887,7 +1922,7 @@ impl<M: InputModeKind> TextElement<M> {
                 .is_some_and(|line| line.table.is_some())
         };
         let style = &state.editor_style;
-        let mut layout = TableRowLayout {
+        TableRowLayout {
             kind: item.kind,
             columns,
             cells,
@@ -1896,7 +1931,7 @@ impl<M: InputModeKind> TextElement<M> {
             rows,
             width: wrap_width,
             len: line_text.len(),
-            focused: None,
+            focused: focused.map(|(cell, _, _)| cell),
             first: !neighbour_is_table(buffer_line.checked_sub(1)),
             chrome: TableChrome {
                 border: style.border,
@@ -1905,29 +1940,7 @@ impl<M: InputModeKind> TextElement<M> {
                     .editor_active_line
                     .unwrap_or(style.border.opacity(0.15)),
             },
-        };
-
-        // The cell the selection lies inside, when both of its ends do: the
-        // one the application reveals, outlined so the writer sees which.
-        let selection = state.selected_range;
-        let line_end = line_start + line_text.len();
-        if selection.start >= line_start && selection.end <= line_end {
-            let (start_cell, _) = layout.cell_of(selection.start - line_start);
-            let (end_cell, _) = layout.cell_of(selection.end - line_start);
-            let inside = |cell: usize, offset: usize| {
-                layout
-                    .cells
-                    .get(cell)
-                    .is_some_and(|c| c.content.start <= offset && offset <= c.content.end)
-            };
-            if start_cell == end_cell
-                && inside(start_cell, selection.start - line_start)
-                && inside(end_cell, selection.end - line_start)
-            {
-                layout.focused = Some(start_cell);
-            }
         }
-        layout
     }
 
     /// First usize is the offset of skipped.

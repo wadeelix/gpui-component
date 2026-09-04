@@ -146,6 +146,7 @@ pub(crate) mod test_support {
                 let trail = span.trim_end().len();
                 let lead = if trail == 0 { span.len() / 2 } else { lead };
                 cells.push(TableCellSpan {
+                    start,
                     content: start + lead..start + trail.max(lead),
                     separator: ix,
                 });
@@ -154,6 +155,7 @@ pub(crate) mod test_support {
         }
         if start < line.len() && !line[start..].trim().is_empty() {
             cells.push(TableCellSpan {
+                start,
                 content: start..line.len(),
                 separator: line.len(),
             });
@@ -161,6 +163,7 @@ pub(crate) mod test_support {
         if let Some(columns) = columns {
             while cells.len() < columns {
                 cells.push(TableCellSpan {
+                    start: line.len(),
                     content: line.len()..line.len(),
                     separator: line.len(),
                 });

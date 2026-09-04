@@ -5260,6 +5260,79 @@ mod tests {
         layout.visible_line_byte_offsets[vi] + table.cells[cell].content.start
     }
 
+    /// The cell the last frame outlined on buffer line `row`.
+    fn focused_cell(state: &InputBaseState<EditorMode>, row: usize) -> Option<usize> {
+        let layout = state.last_layout.as_ref().expect("layout");
+        let vi = layout
+            .visible_buffer_lines
+            .iter()
+            .position(|&b| b == row)
+            .expect("the row is visible");
+        layout.lines[vi]
+            .table
+            .as_ref()
+            .expect("a table row")
+            .focused
+    }
+
+    /// A space typed at a cell's end puts the caret in the cell's padding:
+    /// still the cell, and drawn after the space, so the caret moves as it
+    /// does in prose. Without this the space showed only once a letter
+    /// followed it, and the keys in between went to the document.
+    #[gpui::test]
+    fn a_space_typed_at_a_cell_s_end_stays_in_the_cell_and_moves_the_caret(
+        cx: &mut TestAppContext,
+    ) {
+        let (mut cx, input) = table_editor(cx, TABLE_DOC);
+        // The end of `cd`, the header's second cell.
+        let end = TABLE_DOC.find("cd").unwrap() + 2;
+        cx.update(|_, cx| input.update(cx, |state, cx| state.set_selected_range(end..end, cx)));
+        draw(&mut cx);
+        let x_before = cx.update(|_, cx| {
+            input.read_with(cx, |state, _| {
+                assert_eq!(focused_cell(state, 1), Some(1));
+                let (_, _, pos) = state.line_and_position_for_offset(end);
+                pos.expect("a position").x
+            })
+        });
+
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.replace_text_in_range(None, " ", window, cx)
+            })
+        });
+        draw(&mut cx);
+        cx.update(|_, cx| {
+            input.read_with(cx, |state, _| {
+                assert_eq!(state.selected_range(), end + 1..end + 1);
+                assert_eq!(
+                    focused_cell(state, 1),
+                    Some(1),
+                    "the caret in the padding is still in the cell"
+                );
+                let (_, range) = state.table_cell(end, 1).expect("the cell");
+                assert_eq!(range.end, end + 1, "the drawn text runs out to the caret");
+                let (_, _, pos) = state.line_and_position_for_offset(end + 1);
+                let x_after = pos.expect("a position").x;
+                assert!(
+                    (x_after - x_before - glyph_width(state)).abs() < px(0.5),
+                    "the caret moved one glyph right: {x_before:?} -> {x_after:?}"
+                );
+            })
+        });
+
+        // With the caret elsewhere the padding is padding again.
+        cx.update(|_, cx| input.update(cx, |state, cx| state.set_selected_range(0..0, cx)));
+        draw(&mut cx);
+        cx.update(|_, cx| {
+            input.read_with(cx, |state, _| {
+                assert_eq!(focused_cell(state, 1), None);
+                let (_, range) = state.table_cell(end, 1).expect("the cell");
+                assert_eq!(range.end, end);
+            })
+        });
+    }
+
     /// Every offset of a table row has a position, and the point it is drawn
     /// at resolves back to it -- or, for a byte in padding or on a pipe, to
     /// the cell edge it was drawn at.
