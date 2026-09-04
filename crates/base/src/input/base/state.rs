@@ -2324,12 +2324,17 @@ impl<M: InputModeKind> InputBaseState<M> {
                     index.min(self.text.len())
                 };
             } else if pos.y < px(0.) {
-                // Mouse is above this line, return start of this line
+                // Mouse is above this line (above the visible top, or on a
+                // collapsed table row that takes no click): the offset under
+                // the same x on this line's first row, or its start.
+                let local_index = line_layout
+                    .closest_index_for_position(point(pos.x, px(0.)), last_layout)
+                    .unwrap_or(0);
+                let index = line_start_offset + local_index;
                 return if self.masked {
-                    self.text
-                        .char_index_to_offset(line_start_offset / MASK_CHAR.len_utf8())
+                    self.text.char_index_to_offset(index / MASK_CHAR.len_utf8())
                 } else {
-                    line_start_offset
+                    index.min(self.text.len())
                 };
             }
 
