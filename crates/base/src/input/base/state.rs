@@ -772,6 +772,36 @@ impl<M: InputModeKind> InputBaseState<M> {
             .set_line_hooks(Some(scale), Some(table_rows), cx);
     }
 
+    /// The window rectangle of column `column` of the table row holding
+    /// `offset`, as laid out on the last frame, and the document range of
+    /// that cell's content. For tests and the debug channel: the geometry a
+    /// click is tested against, made readable from outside the engine.
+    #[doc(hidden)]
+    pub fn table_cell(
+        &self,
+        offset: usize,
+        column: usize,
+    ) -> Option<(Bounds<Pixels>, Range<usize>)> {
+        let layout = self.last_layout.as_ref()?;
+        let bounds = self.last_bounds?;
+        let row = self.text.offset_to_point(offset.min(self.text.len())).row;
+        let vi = layout.visible_buffer_lines.iter().position(|&b| b == row)?;
+        let line = layout.lines.get(vi)?;
+        let table = line.table.as_ref()?;
+        let geometry = table.columns.get(column)?;
+        let cell = table.cells.get(column)?;
+        let line_start = layout.visible_line_byte_offsets[vi];
+        let origin = bounds.origin
+            + point(
+                layout.line_number_width + geometry.x,
+                layout.line_height * self.display_map.buffer_line_top(row),
+            );
+        Some((
+            Bounds::new(origin, gpui::size(geometry.width, table.size().height)),
+            line_start + cell.content.start..line_start + cell.content.end,
+        ))
+    }
+
     /// Re-lays out the lines covering `range` from the current text.
     ///
     /// For a change that is not an edit but changes how a line is laid out:
@@ -5036,6 +5066,556 @@ mod tests {
                     "scrolled to {:?}, expected {:?}",
                     scrolled.y,
                     expected
+                );
+            });
+        });
+    }
+
+    // ---- Table rows laid out per cell -----------------------------------
+
+    /// Cells of one table line: the text between pipes, trimmed, an empty
+    /// cell mid-padding, padded to `columns`.
+    fn table_cells(line: &str, columns: Option<usize>) -> Vec<crate::input::TableCellSpan> {
+        let mut cells = Vec::new();
+        let mut start = usize::from(line.starts_with('|'));
+        for (ix, ch) in line.char_indices().skip(start) {
+            if ch == '|' {
+                let span = &line[start..ix];
+                let lead = span.len() - span.trim_start().len();
+                let trail = span.trim_end().len();
+                let lead = if trail == 0 { span.len() / 2 } else { lead };
+                cells.push(crate::input::TableCellSpan {
+                    content: start + lead..start + trail.max(lead),
+                    separator: ix,
+                });
+                start = ix + 1;
+            }
+        }
+        if let Some(columns) = columns {
+            while cells.len() < columns {
+                cells.push(crate::input::TableCellSpan {
+                    content: line.len()..line.len(),
+                    separator: line.len(),
+                });
+            }
+            cells.truncate(columns);
+        }
+        cells
+    }
+
+    /// A highlighter whose only job is to say which lines are table rows: a
+    /// run of lines with a pipe whose second line is dashes.
+    struct TableHighlighter;
+
+    impl crate::input::InputHighlighter for TableHighlighter {
+        fn language(&self) -> SharedString {
+            "table-test".into()
+        }
+
+        fn update(
+            &mut self,
+            _edit: Option<crate::input::InputEdit>,
+            _text: &Rope,
+            _folding: bool,
+            _window: &mut Window,
+            _cx: &mut Context<crate::input::EditorState>,
+        ) {
+        }
+
+        fn styles(
+            &self,
+            range: &Range<usize>,
+            _resolver: &dyn crate::input::HighlightStyleResolver,
+        ) -> Vec<(Range<usize>, HighlightStyle)> {
+            vec![(range.clone(), HighlightStyle::default())]
+        }
+
+        fn fold_ranges(&self, _text: &Rope) -> Vec<crate::input::FoldRange> {
+            Vec::new()
+        }
+
+        fn table_row(
+            &self,
+            line_range: &Range<usize>,
+            text: &Rope,
+            _generation: u64,
+        ) -> Option<crate::input::TableRow> {
+            use crate::input::TableRowKind;
+            let line_of = |r: usize| -> Option<String> {
+                (r < text.lines_len()).then(|| text.slice_line(r).to_string())
+            };
+            let is_table =
+                |r: usize| line_of(r).is_some_and(|l| !l.trim().is_empty() && l.contains('|'));
+            let row = text.offset_to_point(line_range.start).row;
+            if !is_table(row) {
+                return None;
+            }
+            let mut first = row;
+            while first > 0 && is_table(first - 1) {
+                first -= 1;
+            }
+            let delimiter = line_of(first + 1)?;
+            if !delimiter.contains('-')
+                || !delimiter
+                    .chars()
+                    .all(|c| matches!(c, '|' | '-' | ':' | ' '))
+            {
+                return None;
+            }
+            let mut last = first + 1;
+            while is_table(last + 1) {
+                last += 1;
+            }
+            let columns = table_cells(&line_of(first)?, None).len();
+            let kind = match row - first {
+                0 => TableRowKind::Header,
+                1 => TableRowKind::Delimiter,
+                _ => TableRowKind::Body,
+            };
+            Some(crate::input::TableRow {
+                first_row: first,
+                last_row: last,
+                kind,
+                columns,
+                aligns: vec![crate::input::ColumnAlign::Left; columns],
+                cells: table_cells(&line_of(row)?, Some(columns)),
+            })
+        }
+    }
+
+    /// prose, a two-column table of three rows, prose.
+    const TABLE_DOC: &str = "prose one\n| ab | cd |\n| --- | --- |\n| e | f |\nprose two\n";
+
+    fn table_editor(
+        cx: &mut TestAppContext,
+        text: &'static str,
+    ) -> (VisualTestContext, Entity<InputBaseState<EditorMode>>) {
+        cx.update(crate::init);
+        let input_view =
+            InputView::build_editor(cx, move |state| state.default_value(text).soft_wrap(true));
+        let mut cx = VisualTestContext::from_window(input_view.window_handle.into(), cx);
+        let input = input_view.input;
+        let factory: crate::input::InputHighlighterFactory = Rc::new(|_lang: &str| {
+            Some(Box::new(TableHighlighter) as Box<dyn crate::input::InputHighlighter>)
+        });
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.set_highlighter_factory(factory, cx);
+                state.focus(window, cx);
+            });
+        });
+        cx.run_until_parked();
+        // The highlighter is created on the first render; the heights are
+        // synced against it after that.
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.update(|_, cx| {
+            input.update(cx, |state, cx| state.refresh_line_heights(cx));
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        (cx, input)
+    }
+
+    fn draw(cx: &mut VisualTestContext) {
+        cx.update(|window, cx| {
+            let _ = window.draw(cx).clear(cx);
+        });
+    }
+
+    /// Width of one glyph, from the first prose line: the test text system
+    /// gives every glyph the same width.
+    fn glyph_width(state: &InputBaseState<EditorMode>) -> Pixels {
+        let (_, _, a) = state.line_and_position_for_offset(0);
+        let (_, _, b) = state.line_and_position_for_offset(1);
+        b.expect("offset 1").x - a.expect("offset 0").x
+    }
+
+    /// The window point just before the boundary after glyph `k` of cell
+    /// `cell` on buffer line `row`, on the first text row of the cell. Just
+    /// before, because gpui resolves an x past the last glyph's start to the
+    /// line's end.
+    fn cell_point(
+        state: &InputBaseState<EditorMode>,
+        row: usize,
+        cell: usize,
+        k: usize,
+    ) -> Point<Pixels> {
+        let layout = state.last_layout.as_ref().expect("layout");
+        let bounds = state.last_bounds.expect("bounds");
+        let vi = layout
+            .visible_buffer_lines
+            .iter()
+            .position(|&b| b == row)
+            .expect("the row is visible");
+        let table = layout.lines[vi].table.as_ref().expect("a table row");
+        let x = bounds.origin.x
+            + layout.line_number_width
+            + table.columns[cell].x
+            + crate::input::display_map::CELL_PAD
+            + glyph_width(state) * k as f32
+            - px(0.1);
+        let y = bounds.origin.y
+            + layout.line_height * state.display_map.buffer_line_top(row)
+            + table.text_row_height / 2.;
+        point(x, y)
+    }
+
+    /// The window point at glyph `k` of prose line `row`.
+    fn prose_point(state: &InputBaseState<EditorMode>, row: usize, k: usize) -> Point<Pixels> {
+        let layout = state.last_layout.as_ref().expect("layout");
+        let bounds = state.last_bounds.expect("bounds");
+        point(
+            bounds.origin.x + layout.line_number_width + glyph_width(state) * k as f32 + px(0.1),
+            bounds.origin.y
+                + layout.line_height * state.display_map.buffer_line_top(row)
+                + layout.line_height / 2.,
+        )
+    }
+
+    /// Document offset of the start of cell `cell` on buffer line `row`.
+    fn cell_start(state: &InputBaseState<EditorMode>, row: usize, cell: usize) -> usize {
+        let layout = state.last_layout.as_ref().expect("layout");
+        let vi = layout
+            .visible_buffer_lines
+            .iter()
+            .position(|&b| b == row)
+            .expect("the row is visible");
+        let table = layout.lines[vi].table.as_ref().expect("a table row");
+        layout.visible_line_byte_offsets[vi] + table.cells[cell].content.start
+    }
+
+    /// A click lands the caret in the clicked cell at the clicked glyph, and
+    /// the caret is drawn there, in the frame that was clicked.
+    #[gpui::test]
+    fn a_click_lands_in_the_cell_at_the_clicked_glyph(cx: &mut TestAppContext) {
+        let (mut cx, input) = table_editor(cx, TABLE_DOC);
+        for (row, cell, k) in [(1, 0, 0), (1, 0, 2), (1, 1, 1), (3, 0, 1), (3, 1, 0)] {
+            draw(&mut cx);
+            let target =
+                cx.update(|_, cx| input.read_with(cx, |state, _| cell_point(state, row, cell, k)));
+            cx.simulate_click(target, gpui::Modifiers::default());
+            cx.run_until_parked();
+            draw(&mut cx);
+            cx.update(|_, cx| {
+                input.read_with(cx, |state, _| {
+                    let expected = cell_start(state, row, cell) + k;
+                    assert_eq!(state.cursor(), expected, "row {row} cell {cell} glyph {k}");
+                    let (caret, _) = state.cursor_layout().expect("a caret");
+                    assert!(
+                        (f32::from(caret.origin.x) - f32::from(target.x + px(0.1))).abs() < 0.5,
+                        "caret x {:?} vs click x {:?}",
+                        caret.origin.x,
+                        target.x
+                    );
+                    let layout = state.last_layout.as_ref().unwrap();
+                    let vi = layout
+                        .visible_buffer_lines
+                        .iter()
+                        .position(|&b| b == row)
+                        .unwrap();
+                    let table = layout.lines[vi].table.as_ref().unwrap();
+                    assert!(
+                        (f32::from(caret.size.height) - 0.85 * f32::from(table.text_row_height))
+                            .abs()
+                            < 0.5,
+                        "the caret is one text row tall"
+                    );
+                    assert_eq!(
+                        table.focused,
+                        Some(cell),
+                        "the clicked cell is the focused one"
+                    );
+                });
+            });
+        }
+    }
+
+    /// A row grows in the same edit that made a cell wrap, before any frame,
+    /// and the prose after the table moves down with it; undo takes it back.
+    #[gpui::test]
+    fn typing_in_a_cell_grows_the_row_before_the_next_frame(cx: &mut TestAppContext) {
+        let (mut cx, input) = table_editor(cx, TABLE_DOC);
+        // Narrow the window so a cell wraps after a dozen characters.
+        cx.simulate_resize(gpui::size(px(320.), px(600.)));
+        cx.run_until_parked();
+        draw(&mut cx);
+
+        let target = cx.update(|_, cx| input.read_with(cx, |state, _| cell_point(state, 3, 0, 1)));
+        cx.simulate_click(target, gpui::Modifiers::default());
+        cx.run_until_parked();
+
+        let (prose_top_before, height_before) = cx.update(|_, cx| {
+            input.read_with(cx, |state, _| {
+                (
+                    state.display_map.buffer_line_top(4),
+                    state.display_map.buffer_line_height(3),
+                )
+            })
+        });
+        assert_eq!(height_before, 1.0);
+
+        // Through the input handler, the way a keystroke arrives, and read
+        // back in the same update: nothing has drawn yet.
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.replace_text_in_range(None, &"x".repeat(40), window, cx);
+                assert!(
+                    state.display_map.buffer_line_height(3) > 1.0,
+                    "the row grew inside the edit"
+                );
+                assert!(
+                    state.display_map.buffer_line_top(4) > prose_top_before,
+                    "the prose after the table moved down inside the edit"
+                );
+            });
+        });
+        draw(&mut cx);
+        cx.update(|_, cx| {
+            input.read_with(cx, |state, _| {
+                let layout = state.last_layout.as_ref().unwrap();
+                let vi = layout
+                    .visible_buffer_lines
+                    .iter()
+                    .position(|&b| b == 3)
+                    .unwrap();
+                let table = layout.lines[vi].table.as_ref().unwrap();
+                assert!(table.rows > 1, "the layout reserves the wrapped rows");
+                assert_eq!(
+                    table.cells[0].lines.len(),
+                    table.rows,
+                    "the tallest cell has one shaped line per row"
+                );
+                assert!(state.text.to_string().contains(&"x".repeat(40)));
+            });
+        });
+
+        // And the real keyboard path adds to it.
+        cx.simulate_input("yy");
+        draw(&mut cx);
+        cx.update(|_, cx| {
+            input.read_with(cx, |state, _| {
+                assert!(state.text.to_string().contains("xyy"));
+            });
+        });
+
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.undo_once(window, cx);
+                state.undo_once(window, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            input.read_with(cx, |state, _| {
+                assert_eq!(state.text.to_string(), TABLE_DOC, "undo restored the bytes");
+                assert_eq!(
+                    state.display_map.buffer_line_height(3),
+                    1.0,
+                    "and the height"
+                );
+                assert_eq!(state.display_map.buffer_line_top(4), prose_top_before);
+            });
+        });
+    }
+
+    /// A drag from prose through the table into prose is one contiguous
+    /// selection in document order, drawn as one rectangle per table row.
+    #[gpui::test(iterations = 20)]
+    fn a_drag_from_prose_through_a_table_selects_in_document_order(cx: &mut TestAppContext) {
+        let (mut cx, input) = table_editor(cx, TABLE_DOC);
+        draw(&mut cx);
+        let (from, via, to) = cx.update(|_, cx| {
+            input.read_with(cx, |state, _| {
+                (
+                    prose_point(state, 0, 2),
+                    cell_point(state, 1, 1, 1),
+                    prose_point(state, 4, 3),
+                )
+            })
+        });
+        let mods = gpui::Modifiers::default();
+        cx.simulate_mouse_down(from, MouseButton::Left, mods);
+        cx.simulate_mouse_move(via, Some(MouseButton::Left), mods);
+        cx.simulate_mouse_move(to, Some(MouseButton::Left), mods);
+        cx.simulate_mouse_up(to, MouseButton::Left, mods);
+        cx.run_until_parked();
+        draw(&mut cx);
+
+        cx.update(|_, cx| {
+            input.read_with(cx, |state, _| {
+                let line4 = state.text.line_start_offset(4);
+                let selected = state.selected_range;
+                assert_eq!((selected.start, selected.end), (2, line4 + 3));
+
+                let layout = state.last_layout.as_ref().unwrap();
+                let corners =
+                    crate::input::element::TextElement::<EditorMode>::match_range_corners(
+                        selected.start..selected.end,
+                        layout,
+                    )
+                    .expect("a selection path");
+                assert_eq!(corners.len(), 5, "prose, three table rows, prose");
+                for (ix, row) in corners[1..4].iter().enumerate() {
+                    assert_eq!(row.top_left.x, px(0.), "table row {ix} from the left edge");
+                    assert_eq!(
+                        row.top_right.x,
+                        layout.wrap_width.unwrap(),
+                        "table row {ix} to the right edge"
+                    );
+                }
+            });
+        });
+    }
+
+    /// Select-all covers every table row edge to edge.
+    #[gpui::test]
+    fn select_all_covers_every_table_row_edge_to_edge(cx: &mut TestAppContext) {
+        let (mut cx, input) = table_editor(cx, TABLE_DOC);
+        draw(&mut cx);
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| state.select_all(window, cx));
+        });
+        draw(&mut cx);
+        cx.update(|_, cx| {
+            input.read_with(cx, |state, _| {
+                let layout = state.last_layout.as_ref().unwrap();
+                let corners =
+                    crate::input::element::TextElement::<EditorMode>::match_range_corners(
+                        0..state.text.len(),
+                        layout,
+                    )
+                    .expect("a selection path");
+                let width = layout.wrap_width.unwrap();
+                for row in &corners[1..4] {
+                    assert_eq!((row.top_left.x, row.top_right.x), (px(0.), width));
+                }
+            });
+        });
+    }
+
+    /// Shift-click extends the selection into a cell; inside one cell it is a
+    /// text selection, across cells it takes whole cells.
+    #[gpui::test]
+    fn shift_click_extends_the_selection_across_cells(cx: &mut TestAppContext) {
+        let (mut cx, input) = table_editor(cx, TABLE_DOC);
+        draw(&mut cx);
+        let first = cx.update(|_, cx| input.read_with(cx, |state, _| cell_point(state, 1, 0, 0)));
+        cx.simulate_click(first, gpui::Modifiers::default());
+        cx.run_until_parked();
+        draw(&mut cx);
+        let same_cell =
+            cx.update(|_, cx| input.read_with(cx, |state, _| cell_point(state, 1, 0, 2)));
+        cx.simulate_click(
+            same_cell,
+            gpui::Modifiers {
+                shift: true,
+                ..Default::default()
+            },
+        );
+        cx.run_until_parked();
+        draw(&mut cx);
+        cx.update(|_, cx| {
+            input.read_with(cx, |state, _| {
+                let start = cell_start(state, 1, 0);
+                assert_eq!(
+                    (state.selected_range.start, state.selected_range.end),
+                    (start, start + 2)
+                );
+                let layout = state.last_layout.as_ref().unwrap();
+                let corners =
+                    crate::input::element::TextElement::<EditorMode>::match_range_corners(
+                        start..start + 2,
+                        layout,
+                    )
+                    .unwrap();
+                assert_eq!(corners.len(), 1);
+                let glyph = glyph_width(state);
+                assert!(
+                    (f32::from(corners[0].top_right.x - corners[0].top_left.x)
+                        - 2. * f32::from(glyph))
+                    .abs()
+                        < 0.5,
+                    "two glyphs wide inside the cell"
+                );
+            });
+        });
+
+        let other_row =
+            cx.update(|_, cx| input.read_with(cx, |state, _| cell_point(state, 3, 1, 1)));
+        cx.simulate_click(
+            other_row,
+            gpui::Modifiers {
+                shift: true,
+                ..Default::default()
+            },
+        );
+        cx.run_until_parked();
+        draw(&mut cx);
+        cx.update(|_, cx| {
+            input.read_with(cx, |state, _| {
+                let start = cell_start(state, 1, 0);
+                let end = cell_start(state, 3, 1) + 1;
+                assert_eq!(
+                    (state.selected_range.start, state.selected_range.end),
+                    (start, end)
+                );
+                let layout = state.last_layout.as_ref().unwrap();
+                let corners =
+                    crate::input::element::TextElement::<EditorMode>::match_range_corners(
+                        start..end,
+                        layout,
+                    )
+                    .unwrap();
+                assert_eq!(corners.len(), 3, "header, delimiter, body");
+                let width = layout.wrap_width.unwrap();
+                assert_eq!(corners[0].top_left.x, px(0.), "from the first cell's edge");
+                assert_eq!(corners[0].top_right.x, width, "past the header's end");
+                assert_eq!(corners[2].top_right.x, width, "to the last cell's edge");
+            });
+        });
+    }
+
+    /// Narrowing the window re-wraps the cells: a long cell that fit becomes
+    /// several rows, and the table row grows with it.
+    #[gpui::test]
+    fn resizing_the_window_rewraps_the_cells(cx: &mut TestAppContext) {
+        const LONG: &str =
+            "| head | h |\n| --- | --- |\n| abcdefghijklmnopqrstuvwxyzabcdefghij | b |\n";
+        let (mut cx, input) = table_editor(cx, LONG);
+        draw(&mut cx);
+        cx.update(|_, cx| {
+            input.read_with(cx, |state, _| {
+                assert_eq!(
+                    state.display_map.buffer_line_height(2),
+                    1.0,
+                    "wide window: one row"
+                );
+            });
+        });
+        cx.simulate_resize(gpui::size(px(320.), px(600.)));
+        cx.run_until_parked();
+        draw(&mut cx);
+        cx.update(|_, cx| {
+            input.read_with(cx, |state, _| {
+                assert!(
+                    state.display_map.buffer_line_height(2) > 1.0,
+                    "narrow window: wrapped"
+                );
+                let layout = state.last_layout.as_ref().unwrap();
+                let vi = layout
+                    .visible_buffer_lines
+                    .iter()
+                    .position(|&b| b == 2)
+                    .unwrap();
+                let table = layout.lines[vi].table.as_ref().unwrap();
+                assert_eq!(table.cells[0].lines.len(), table.rows);
+                assert_eq!(
+                    table.cells[1].lines.len(),
+                    1,
+                    "the short cell stays one row"
                 );
             });
         });
