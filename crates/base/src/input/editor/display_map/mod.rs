@@ -10,11 +10,12 @@
 mod display_map;
 mod fold_map;
 mod folding;
+mod table_row;
 mod text_wrapper;
 mod wrap_map;
 
 // Re-export public API
-pub use self::display_map::{DisplayMap, LineHeightScale, WrappingIndent};
+pub use self::display_map::{DisplayMap, LineHeightScale, TableRowSource, WrappingIndent};
 pub(crate) use self::text_wrapper::{LineLayout, normalize_concealed};
 
 // Re-export FoldRange and extract_fold_ranges

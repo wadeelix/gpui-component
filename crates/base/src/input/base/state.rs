@@ -34,8 +34,8 @@ use crate::actions::{SelectDown, SelectLeft, SelectRight, SelectUp};
 use crate::input::blink_cursor::CURSOR_WIDTH;
 use crate::input::movement::MoveDirection;
 use crate::input::{
-    InputExtras as _, LineHeightScale, Position, RopeExt as _, Selection, element::RIGHT_MARGIN,
-    layout::LastLayout,
+    InputExtras as _, LineHeightScale, Position, RopeExt as _, Selection, TableRowSource,
+    element::RIGHT_MARGIN, layout::LastLayout,
 };
 use crate::{AutoScroll, StepAction};
 
@@ -748,16 +748,39 @@ impl<M: InputModeKind> InputBaseState<M> {
         // A line's height is its font scale times whatever extra room it asks
         // for. The two are separate because a heading grows its *text*, while
         // a block widget needs room without the text under it growing at all.
-        let scale: LineHeightScale = Rc::new(move |range: &Range<usize>| {
+        let scale: LineHeightScale = {
+            let highlighter = highlighter.clone();
+            Rc::new(move |range: &Range<usize>| {
+                highlighter
+                    .borrow()
+                    .as_ref()
+                    .map(|highlighter| {
+                        highlighter.line_font_scale(range) * highlighter.line_height_scale(range)
+                    })
+                    .unwrap_or(1.0)
+            })
+        };
+        // Which lines are table rows, decided by the same highlighter at the
+        // same moment: at wrap time, from the text as it will be.
+        let table_rows: TableRowSource = Rc::new(move |range: &Range<usize>, text, generation| {
             highlighter
                 .borrow()
                 .as_ref()
-                .map(|highlighter| {
-                    highlighter.line_font_scale(range) * highlighter.line_height_scale(range)
-                })
-                .unwrap_or(1.0)
+                .and_then(|highlighter| highlighter.table_row(range, text, generation))
         });
-        self.display_map.set_height_scale(Some(scale), cx);
+        self.display_map
+            .set_line_hooks(Some(scale), Some(table_rows), cx);
+    }
+
+    /// Re-lays out the lines covering `range` from the current text.
+    ///
+    /// For a change that is not an edit but changes how a line is laid out:
+    /// a table that starts or stops being laid out as one because the caret
+    /// moved, for instance. Bounded to `range`, unlike
+    /// [`Self::refresh_line_heights`].
+    pub fn rewrap_lines(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
+        self.display_map.rewrap(range, cx);
+        cx.notify();
     }
 
     /// Install a default adapter without replacing an application-provided one.

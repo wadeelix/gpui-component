@@ -11,9 +11,11 @@ use smallvec::SmallVec;
 use sum_tree::{Bias, Dimensions, SumTree};
 
 use crate::input::{
-    Point as TreeSitterPoint, RopeExt,
+    Point as TreeSitterPoint, RopeExt, TableRow,
     layout::{LastLayout, WhitespaceIndicators},
 };
+
+use super::table_row::TableRowItem;
 
 /// Controls how soft-wrapped continuation lines are indented.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -44,6 +46,9 @@ pub(crate) struct LineItem {
     /// draws larger (an ATX heading). Every wrap row of a line is equally
     /// tall, so the line's own height is `scale * lines_len()`.
     pub(crate) height_scale: f32,
+    /// Set when this line is a table row: its cells, wrapped. Such a line
+    /// has one wrap row, `height_scale` tall, which is `rows` text rows.
+    pub(crate) table: Option<std::sync::Arc<TableRowItem>>,
 }
 
 impl LineItem {
@@ -153,6 +158,12 @@ impl<'a> sum_tree::Dimension<'a, LineSummary> for WrapRows {
 /// application (see `InputHighlighter::line_font_scale`).
 pub type LineHeightScale = Rc<dyn Fn(&Range<usize>) -> f32>;
 
+/// The table row a buffer line is, supplied by the application (see
+/// `InputHighlighter::table_row`): the line's byte range, the text as it will
+/// be after the edit being applied, and a generation that changes once per
+/// rebuild so one table's parse can be shared across its rows.
+pub type TableRowSource = Rc<dyn Fn(&Range<usize>, &Rope, u64) -> Option<TableRow>>;
+
 /// Keeps a scale usable as a height: finite, positive, and not so large that a
 /// single line could dominate the document. A hostile or buggy value would
 /// otherwise poison every sum in the tree.
@@ -199,6 +210,18 @@ impl<'a> sum_tree::Dimension<'a, LineSummary> for Height {
     }
 }
 
+/// The rows one edit rebuilds; see `TextWrapper::plan_rows`.
+struct RebuildPlan {
+    /// Rows to rebuild, in the new text.
+    lo: usize,
+    hi: usize,
+    /// The same rows in the old text, to splice out.
+    old_lo: usize,
+    old_hi: usize,
+    /// What the application said about the rows it was already asked about.
+    answers: std::collections::HashMap<usize, Option<TableRow>>,
+}
+
 /// Used to prepare the text with soft wrap to be get lines to displayed in the Editor.
 ///
 /// After use lines to calculate the scroll size of the Editor.
@@ -212,6 +235,11 @@ pub(crate) struct TextWrapper {
     /// Per-line height multiplier, supplied by the application. `None` keeps
     /// every line at the base height, which is the uniform behaviour.
     height_scale: Option<LineHeightScale>,
+    /// Which lines are table rows, supplied by the application. `None` lays
+    /// every line out as prose.
+    table_rows: Option<TableRowSource>,
+    /// Bumped once per rebuild, handed to `table_rows` so it can cache.
+    generation: u64,
     /// The lines by split \n
     pub(crate) lines: SumTree<LineItem>,
 
@@ -228,6 +256,8 @@ impl TextWrapper {
             wrap_width,
             wrapping_indent: WrappingIndent::default(),
             height_scale: None,
+            table_rows: None,
+            generation: 0,
             lines: SumTree::new(&()),
             _initialized: false,
         }
@@ -329,11 +359,34 @@ impl TextWrapper {
         self.update_all(&self.text.clone(), cx);
     }
 
+    /// Installs the height multiplier and the table-row source together and
+    /// rebuilds every line once, since either may change any line's height.
+    pub(crate) fn set_line_hooks(
+        &mut self,
+        scale: Option<LineHeightScale>,
+        table_rows: Option<TableRowSource>,
+        cx: &mut App,
+    ) {
+        self.height_scale = scale;
+        self.table_rows = table_rows;
+        self.update_all(&self.text.clone(), cx);
+    }
+
+    /// Re-lays out the lines covering `range` from the current text, as if
+    /// those bytes had just been typed. For a change that is not an edit.
+    pub(crate) fn rewrap(&mut self, range: Range<usize>, cx: &mut App) {
+        let text = self.text.clone();
+        let end = range.end.min(text.len());
+        let start = range.start.min(end);
+        let slice = Rope::from(text.slice(start..end).to_string().as_str());
+        self.update(&text, &(start..end), &slice, cx);
+    }
+
     /// Whether every line is one base height tall. The uniform document must
     /// keep taking the same arithmetic it always did, so callers branch on
     /// this rather than paying for a tree seek per frame.
     pub(crate) fn is_uniform_height(&self) -> bool {
-        self.height_scale.is_none()
+        self.height_scale.is_none() && self.table_rows.is_none()
     }
 
     /// Total document height, in base line heights.
@@ -435,6 +488,8 @@ impl TextWrapper {
     ) where
         F: FnMut(&str, Pixels) -> Vec<gpui::Boundary>,
     {
+        self.generation = self.generation.wrapping_add(1);
+
         // Remove the old changed lines.
         let buffer_line_count = self.lines_count();
         let start_row = self.text.offset_to_point(range.start).row;
@@ -448,20 +503,81 @@ impl TextWrapper {
             .offset_to_point(range.start + new_text.len())
             .row;
 
-        let mut new_lines = Vec::with_capacity(new_end_row.saturating_sub(new_start_row) + 1);
         let wrap_width = self.wrap_width;
 
+        // A table's rows are laid out against each other, so an edit that
+        // changed a table's shape rebuilds every row of that table, and a
+        // row that stopped being one is rebuilt as prose. The plan says which
+        // rows, in both the old and the new text, and holds the application's
+        // answers so each row is asked about once.
+        let plan = self.plan_rows(changed_text, start_row, end_row, new_start_row, new_end_row);
+        let delta = new_end_row as isize - end_row as isize;
+
+        let mut new_lines = Vec::with_capacity(plan.hi.saturating_sub(plan.lo) + 1);
+
         // line not contains `\n`.
-        for row in new_start_row..=new_end_row {
+        for row in plan.lo..=plan.hi {
             let line = changed_text.slice_line(row);
+            let line_str: Cow<str> = line.into();
+
+            // Asked once per line here, where the line is being (re)built
+            // anyway, rather than per frame: a scroll must not re-ask, and an
+            // edit only rebuilds the rows it touched.
+            // The range is into `changed_text` — the text as it will be after
+            // this update — so the application resolves it against the same
+            // buffer the engine is building, not a stale snapshot.
+            let line_start = changed_text.line_start_offset(row);
+            let line_range = line_start..line_start + line.len();
+            let height_scale = match &self.height_scale {
+                Some(scale) => normalize_scale(scale(&line_range)),
+                None => 1.0,
+            };
+
+            let table_row = match plan.answers.get(&row) {
+                Some(answer) => answer.clone(),
+                None => self.ask_table_row(&line_range, changed_text),
+            };
+            if let (Some(table_row), Some(wrap_width)) = (table_row, wrap_width) {
+                // A row the edit did not touch keeps its item when its cells
+                // are the same, so a keystroke in one cell re-wraps one row.
+                let outside_edit = row < new_start_row || row > new_end_row;
+                if outside_edit {
+                    let old_row = if row < new_start_row {
+                        row
+                    } else {
+                        (row as isize - delta) as usize
+                    };
+                    if let Some(old) = self.line(old_row)
+                        && old.len() == line.len()
+                        && old
+                            .table
+                            .as_ref()
+                            .is_some_and(|item| item.same_shape(&table_row))
+                    {
+                        new_lines.push(old.clone());
+                        continue;
+                    }
+                }
+                let item = TableRowItem::build(&table_row, &line_str, wrap_width, wrap_line);
+                let rows = item.rows as f32;
+                new_lines.push(LineItem {
+                    len: line.len(),
+                    indent: 0,
+                    wrapped_lines: smallvec::smallvec![0..line.len()],
+                    // The cells decided the row count; the multiplier from
+                    // the application scales the text rows, not the count.
+                    height_scale: height_scale * rows,
+                    table: Some(std::sync::Arc::new(item)),
+                });
+                continue;
+            }
+
             let mut wrapped_lines = SmallVec::<[Range<usize>; 1]>::new();
             let mut prev_boundary_ix = 0;
             let mut indent_chars = 0;
 
             // If wrap_width is Pixels::MAX, skip wrapping to disable word wrap
             if let Some(wrap_width) = wrap_width {
-                // Borrowed for lines within a single rope chunk.
-                let line_str: Cow<str> = line.into();
                 match self.wrapping_indent {
                     WrappingIndent::Same => {
                         // Here only have wrapped line, if there is no wrap meet, the `line_wraps`
@@ -495,25 +611,12 @@ impl TextWrapper {
                 wrapped_lines.push(prev_boundary_ix..line.len());
             }
 
-            // Asked once per line here, where the line is being (re)built
-            // anyway, rather than per frame: a scroll must not re-ask, and an
-            // edit only rebuilds the rows it touched.
-            // The range is into `changed_text` — the text as it will be after
-            // this update — so the application resolves it against the same
-            // buffer the engine is building, not a stale snapshot.
-            let height_scale = match &self.height_scale {
-                Some(scale) => {
-                    let start = changed_text.line_start_offset(row);
-                    normalize_scale(scale(&(start..start + line.len())))
-                }
-                None => 1.0,
-            };
-
             new_lines.push(LineItem {
                 len: line.len(),
                 indent: indent_chars,
                 wrapped_lines,
                 height_scale,
+                table: None,
             });
         }
 
@@ -521,9 +624,9 @@ impl TextWrapper {
             self.lines = SumTree::from_iter(new_lines, &());
         } else {
             let mut cursor = self.lines.cursor::<BufferRows>(&());
-            let mut new_tree = cursor.slice(&BufferRows(start_row), Bias::Right);
+            let mut new_tree = cursor.slice(&BufferRows(plan.old_lo), Bias::Right);
             // Skip the replaced rows
-            cursor.seek_forward(&BufferRows(end_row + 1), Bias::Right);
+            cursor.seek_forward(&BufferRows(plan.old_hi + 1), Bias::Right);
             new_tree.extend(new_lines, &());
             // Untouched rows after the edit
             new_tree.append(cursor.suffix(), &());
@@ -532,6 +635,102 @@ impl TextWrapper {
         }
 
         self.text = changed_text.clone();
+    }
+
+    /// Asks the application whether the line at `line_range` is a table row.
+    fn ask_table_row(&self, line_range: &Range<usize>, text: &Rope) -> Option<TableRow> {
+        let source = self.table_rows.as_ref()?;
+        if self.wrap_width.is_none() {
+            // Without a width there is nothing to wrap a cell at.
+            return None;
+        }
+        source(line_range, text, self.generation)
+    }
+
+    /// Which rows an edit rebuilds, and what the application said about them.
+    ///
+    /// Without tables it is the edited rows, as it always was. With them, a
+    /// table whose rows the edit touched is rebuilt whole -- its old rows
+    /// found by walking the old tree, since a table is a contiguous run of
+    /// table rows -- and any table the new text puts those rows in is added
+    /// to the range until it stops growing. The rows are in the new text;
+    /// `old_lo..=old_hi` are the same rows in the old one.
+    fn plan_rows(
+        &self,
+        changed_text: &Rope,
+        start_row: usize,
+        end_row: usize,
+        new_start_row: usize,
+        new_end_row: usize,
+    ) -> RebuildPlan {
+        let mut plan = RebuildPlan {
+            lo: new_start_row,
+            hi: new_end_row,
+            old_lo: start_row,
+            old_hi: end_row,
+            answers: std::collections::HashMap::new(),
+        };
+        if self.table_rows.is_none() || self.wrap_width.is_none() {
+            return plan;
+        }
+        let old_count = self.lines_count();
+        let new_count = changed_text.lines_len();
+        let delta = new_end_row as isize - end_row as isize;
+        let is_old_table = |row: usize| self.line(row).is_some_and(|item| item.table.is_some());
+
+        // 1. The tables the edited rows were part of, in the old text.
+        if !self.lines.is_empty() {
+            if is_old_table(start_row) {
+                let mut first = start_row;
+                while first > 0 && is_old_table(first - 1) {
+                    first -= 1;
+                }
+                plan.lo = plan.lo.min(first);
+            }
+            if is_old_table(end_row) {
+                let mut last = end_row;
+                while last + 1 < old_count && is_old_table(last + 1) {
+                    last += 1;
+                }
+                // Rows after the edit shift by the edit's line delta.
+                let last_new = (last as isize + delta).max(new_end_row as isize) as usize;
+                plan.hi = plan.hi.max(last_new);
+            }
+        }
+
+        // 2. The tables the new text puts those rows in, until it stops growing.
+        let mut lo = plan.lo;
+        let mut hi = plan.hi.min(new_count.saturating_sub(1));
+        loop {
+            let (before_lo, before_hi) = (lo, hi);
+            for row in lo..=hi {
+                if plan.answers.contains_key(&row) {
+                    continue;
+                }
+                let line_start = changed_text.line_start_offset(row);
+                let line_range = line_start..line_start + changed_text.line_len(row);
+                let answer = self.ask_table_row(&line_range, changed_text);
+                if let Some(table_row) = &answer {
+                    lo = lo.min(table_row.first_row);
+                    hi = hi.max(table_row.last_row.min(new_count.saturating_sub(1)));
+                }
+                plan.answers.insert(row, answer);
+            }
+            if (lo, hi) == (before_lo, before_hi) {
+                break;
+            }
+        }
+        plan.lo = lo;
+        plan.hi = hi;
+        // Rows before the edit are the same rows in both texts; rows after it
+        // are shifted by the delta.
+        plan.old_lo = plan.lo.min(start_row);
+        plan.old_hi = if plan.hi > new_end_row {
+            ((plan.hi as isize - delta) as usize).min(old_count.saturating_sub(1))
+        } else {
+            end_row
+        };
+        plan
     }
 
     /// Update the text wrapper and recalculate the wrapped lines.
@@ -1315,18 +1514,21 @@ mod tests {
                     indent: 0,
                     wrapped_lines: smallvec::smallvec![0..2],
                     height_scale: 1.0,
+                    table: None,
                 },
                 LineItem {
                     len: 4,
                     indent: 0,
                     wrapped_lines: smallvec::smallvec![0..2, 2..4],
                     height_scale: 1.0,
+                    table: None,
                 },
                 LineItem {
                     len: 1,
                     indent: 0,
                     wrapped_lines: smallvec::smallvec![0..1],
                     height_scale: 1.0,
+                    table: None,
                 },
             ],
             &(),
@@ -1549,6 +1751,7 @@ mod tests {
                     indent: 0,
                     wrapped_lines: smallvec::smallvec![0..15],
                     height_scale: 1.0,
+                    table: None,
                 },
                 // range: 16..36
                 LineItem {
@@ -1556,6 +1759,7 @@ mod tests {
                     indent: 0,
                     wrapped_lines: smallvec::smallvec![0..10, 10..20],
                     height_scale: 1.0,
+                    table: None,
                 },
                 // range: 37..56
                 LineItem {
@@ -1563,6 +1767,7 @@ mod tests {
                     indent: 0,
                     wrapped_lines: smallvec::smallvec![0..9, 9..15, 15..20],
                     height_scale: 1.0,
+                    table: None,
                 },
                 // range: 57..79
                 LineItem {
@@ -1570,6 +1775,7 @@ mod tests {
                     indent: 0,
                     wrapped_lines: smallvec::smallvec![0..22],
                     height_scale: 1.0,
+                    table: None,
                 },
             ],
             &(),
@@ -2129,5 +2335,278 @@ mod tests {
             "clamped, not summed"
         );
         assert_eq!(normalize_scale(2.5), 2.5, "an ordinary scale is kept");
+    }
+
+    // ---- Table rows ---------------------------------------------------------
+
+    /// Cells of one table line for the tests: the text between pipes, trimmed,
+    /// an empty cell mid-padding, padded to `columns`.
+    fn test_cells(line: &str, columns: Option<usize>) -> Vec<crate::input::TableCellSpan> {
+        let mut cells = Vec::new();
+        let mut start = usize::from(line.starts_with('|'));
+        for (ix, ch) in line.char_indices().skip(start) {
+            if ch == '|' {
+                let span = &line[start..ix];
+                let lead = span.len() - span.trim_start().len();
+                let trail = span.trim_end().len();
+                let lead = if trail == 0 { span.len() / 2 } else { lead };
+                cells.push(crate::input::TableCellSpan {
+                    content: start + lead..start + trail.max(lead),
+                    separator: ix,
+                });
+                start = ix + 1;
+            }
+        }
+        if start < line.len() && !line[start..].trim().is_empty() {
+            cells.push(crate::input::TableCellSpan {
+                content: start..line.len(),
+                separator: line.len(),
+            });
+        }
+        if let Some(columns) = columns {
+            while cells.len() < columns {
+                cells.push(crate::input::TableCellSpan {
+                    content: line.len()..line.len(),
+                    separator: line.len(),
+                });
+            }
+            cells.truncate(columns);
+        }
+        cells
+    }
+
+    /// A table-row source for the tests: a run of lines with a pipe whose
+    /// second line is dashes is a table. `enabled` lets a test switch tables
+    /// off without changing the text, the way a mode toggle does.
+    fn test_table_source(enabled: Rc<std::cell::Cell<bool>>) -> TableRowSource {
+        use crate::input::TableRowKind;
+        Rc::new(move |range: &Range<usize>, text: &Rope, _generation: u64| {
+            if !enabled.get() {
+                return None;
+            }
+            let line_of = |r: usize| -> Option<String> {
+                (r < text.lines_len()).then(|| text.slice_line(r).to_string())
+            };
+            let is_table =
+                |r: usize| line_of(r).is_some_and(|l| !l.trim().is_empty() && l.contains('|'));
+            let row = text.offset_to_point(range.start).row;
+            if !is_table(row) {
+                return None;
+            }
+            let mut first = row;
+            while first > 0 && is_table(first - 1) {
+                first -= 1;
+            }
+            let delimiter = line_of(first + 1)?;
+            if !delimiter.contains('-')
+                || !delimiter
+                    .chars()
+                    .all(|c| matches!(c, '|' | '-' | ':' | ' '))
+            {
+                return None;
+            }
+            let mut last = first + 1;
+            while is_table(last + 1) {
+                last += 1;
+            }
+            let columns = test_cells(&line_of(first)?, None).len();
+            let kind = match row - first {
+                0 => TableRowKind::Header,
+                1 => TableRowKind::Delimiter,
+                _ => TableRowKind::Body,
+            };
+            Some(TableRow {
+                first_row: first,
+                last_row: last,
+                kind,
+                columns,
+                aligns: vec![crate::input::ColumnAlign::Left; columns],
+                cells: test_cells(&line_of(row)?, Some(columns)),
+            })
+        })
+    }
+
+    /// Wraps at every `width / 10` bytes, so a test can reason in characters:
+    /// two columns across 100px leave 38px per cell, three characters a row.
+    fn wrap_every(text: &str, width: Pixels) -> Vec<gpui::Boundary> {
+        let per_row = (f32::from(width) / 10.).floor().max(1.) as usize;
+        let mut out = Vec::new();
+        let mut ix = per_row;
+        while ix < text.len() {
+            out.push(gpui::Boundary { ix, next_indent: 0 });
+            ix += per_row;
+        }
+        out
+    }
+
+    fn table_wrapper(text: &Rope, enabled: &Rc<std::cell::Cell<bool>>) -> TextWrapper {
+        let mut wrapper = TextWrapper::new(test_font(), px(14.), Some(px(100.)));
+        wrapper.table_rows = Some(test_table_source(Rc::clone(enabled)));
+        wrapper._update(text, &(0..text.len()), text, &mut wrap_every);
+        wrapper
+    }
+
+    fn edit(wrapper: &mut TextWrapper, text: &mut Rope, range: Range<usize>, new: &str) {
+        text.replace(range.clone(), new);
+        wrapper._update(text, &range, &Rope::from(new), &mut wrap_every);
+    }
+
+    /// Every row equals what a wrapper built from scratch would hold: the
+    /// incremental rebuild may skip rows, but never leave a stale one.
+    fn assert_same_as_scratch(
+        wrapper: &TextWrapper,
+        text: &Rope,
+        enabled: &Rc<std::cell::Cell<bool>>,
+    ) {
+        let scratch = table_wrapper(text, enabled);
+        let got: Vec<_> = wrapper.iter_lines().collect();
+        let want: Vec<_> = scratch.iter_lines().collect();
+        assert_eq!(got.len(), want.len(), "row count");
+        for (row, (g, w)) in got.iter().zip(want.iter()).enumerate() {
+            assert_eq!(g.len(), w.len(), "row {row} len");
+            assert_eq!(g.wrapped_lines, w.wrapped_lines, "row {row} wrap");
+            assert_eq!(g.height_scale, w.height_scale, "row {row} height");
+            assert_eq!(g.table, w.table, "row {row} table");
+        }
+        assert_eq!(wrapper.total_height(), scratch.total_height());
+    }
+
+    const TABLE: &str = "p\n| abcdefg | x |\n| --- | --- |\n| 1 | 2 |\nq";
+
+    #[test]
+    fn a_table_row_is_one_wrap_row_as_tall_as_its_tallest_cell() {
+        let enabled = Rc::new(std::cell::Cell::new(true));
+        let text = Rope::from(TABLE);
+        let wrapper = table_wrapper(&text, &enabled);
+
+        assert!(!wrapper.is_uniform_height());
+        let header = wrapper.line(1).unwrap();
+        let item = header.table.as_ref().expect("the header is a table row");
+        assert_eq!(item.rows, 3, "seven characters at three per row");
+        assert_eq!(header.lines_len(), 1, "one wrap row, however tall");
+        assert_eq!(header.height_scale, 3.0);
+        assert_eq!(wrapper.line(2).unwrap().height_scale, 1.0, "the delimiter");
+        assert!(
+            wrapper.line(0).unwrap().table.is_none(),
+            "prose stays prose"
+        );
+        assert!(wrapper.line(4).unwrap().table.is_none());
+        // Tops: p 0, header 1, delimiter 4, body 5, q 6; total 7.
+        assert_eq!(wrapper.line_top(2), 4.0);
+        assert_eq!(wrapper.total_height(), 7.0);
+    }
+
+    #[test]
+    fn a_keystroke_in_one_cell_rewraps_that_row_and_keeps_the_others() {
+        let enabled = Rc::new(std::cell::Cell::new(true));
+        let mut text = Rope::from(TABLE);
+        let mut wrapper = table_wrapper(&text, &enabled);
+        let header_before = wrapper.line(1).unwrap().table.clone().unwrap();
+
+        let at = TABLE.find("| 1 |").unwrap() + 3;
+        edit(&mut wrapper, &mut text, at..at, "234567");
+        assert_same_as_scratch(&wrapper, &text, &enabled);
+        assert_eq!(wrapper.line(3).unwrap().table.as_ref().unwrap().rows, 3);
+        let header_after = wrapper.line(1).unwrap().table.clone().unwrap();
+        assert!(
+            std::sync::Arc::ptr_eq(&header_before, &header_after),
+            "the header's item was kept, not rebuilt"
+        );
+    }
+
+    #[test]
+    fn deleting_the_delimiter_row_turns_the_table_back_into_prose() {
+        let enabled = Rc::new(std::cell::Cell::new(true));
+        let mut text = Rope::from(TABLE);
+        let mut wrapper = table_wrapper(&text, &enabled);
+
+        let start = TABLE.find("| --- | --- |").unwrap();
+        edit(
+            &mut wrapper,
+            &mut text,
+            start..start + "| --- | --- |".len(),
+            "x",
+        );
+        assert_same_as_scratch(&wrapper, &text, &enabled);
+        for row in 0..wrapper.lines_count() {
+            assert!(wrapper.line(row).unwrap().table.is_none(), "row {row}");
+        }
+        assert!(wrapper.total_height() > 0.);
+    }
+
+    #[test]
+    fn a_pipe_typed_under_a_table_joins_it() {
+        let enabled = Rc::new(std::cell::Cell::new(true));
+        let mut text = Rope::from(TABLE);
+        let mut wrapper = table_wrapper(&text, &enabled);
+        let header_before = wrapper.line(1).unwrap().table.clone().unwrap();
+
+        let q = TABLE.rfind('q').unwrap();
+        edit(&mut wrapper, &mut text, q..q + 1, "| q | r |");
+        assert_same_as_scratch(&wrapper, &text, &enabled);
+        assert!(
+            wrapper.line(4).unwrap().table.is_some(),
+            "q joined the table"
+        );
+        assert!(std::sync::Arc::ptr_eq(
+            &header_before,
+            &wrapper.line(1).unwrap().table.clone().unwrap()
+        ));
+    }
+
+    #[test]
+    fn a_column_added_to_the_header_rebuilds_every_row() {
+        let enabled = Rc::new(std::cell::Cell::new(true));
+        let mut text = Rope::from(TABLE);
+        let mut wrapper = table_wrapper(&text, &enabled);
+        let body_before = wrapper.line(3).unwrap().table.clone().unwrap();
+
+        let end = TABLE.find("| x |").unwrap() + "| x |".len();
+        edit(&mut wrapper, &mut text, end..end, " y |");
+        assert_same_as_scratch(&wrapper, &text, &enabled);
+        for row in 1..=3 {
+            assert_eq!(
+                wrapper.line(row).unwrap().table.as_ref().unwrap().columns,
+                3,
+                "row {row}"
+            );
+        }
+        assert!(!std::sync::Arc::ptr_eq(
+            &body_before,
+            &wrapper.line(3).unwrap().table.clone().unwrap()
+        ));
+    }
+
+    #[test]
+    fn inserting_a_line_above_a_table_keeps_its_rows() {
+        let enabled = Rc::new(std::cell::Cell::new(true));
+        let mut text = Rope::from(TABLE);
+        let mut wrapper = table_wrapper(&text, &enabled);
+        edit(&mut wrapper, &mut text, 0..0, "new\n");
+        assert_same_as_scratch(&wrapper, &text, &enabled);
+        assert!(wrapper.line(2).unwrap().table.is_some());
+        assert_eq!(wrapper.total_height(), 8.0);
+    }
+
+    #[test]
+    fn a_source_switched_off_and_relaid_out_returns_the_rows_to_prose() {
+        let enabled = Rc::new(std::cell::Cell::new(true));
+        let text = Rope::from(TABLE);
+        let mut wrapper = table_wrapper(&text, &enabled);
+        let range = TABLE.find('|').unwrap()..TABLE.rfind('|').unwrap() + 1;
+
+        enabled.set(false);
+        let slice = Rope::from(&TABLE[range.clone()]);
+        wrapper._update(&text, &range, &slice, &mut wrap_every);
+        assert!((1..=3).all(|row| wrapper.line(row).unwrap().table.is_none()));
+        // As prose, the 15-character header wraps at ten characters a row.
+        assert_eq!(wrapper.line(1).unwrap().lines_len(), 2);
+        assert_eq!(wrapper.line(1).unwrap().height_scale, 1.0);
+
+        enabled.set(true);
+        wrapper._update(&text, &range, &slice, &mut wrap_every);
+        assert_same_as_scratch(&wrapper, &text, &enabled);
+        assert_eq!(wrapper.line(1).unwrap().lines_len(), 1);
+        assert_eq!(wrapper.line(1).unwrap().height_scale, 3.0);
     }
 }

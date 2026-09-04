@@ -98,6 +98,19 @@ impl WrapMap {
         self.wrapper.set_height_scale(scale, cx);
     }
 
+    pub(super) fn set_line_hooks(
+        &mut self,
+        scale: Option<super::text_wrapper::LineHeightScale>,
+        table_rows: Option<super::text_wrapper::TableRowSource>,
+        cx: &mut App,
+    ) {
+        self.wrapper.set_line_hooks(scale, table_rows, cx);
+    }
+
+    pub(super) fn rewrap(&mut self, range: Range<usize>, cx: &mut App) {
+        self.wrapper.rewrap(range, cx);
+    }
+
     pub(super) fn buffer_line_to_first_wrap_row(&self, line: usize) -> usize {
         self.wrapper.buffer_line_to_first_wrap_row(line)
     }

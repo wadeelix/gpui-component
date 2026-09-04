@@ -112,6 +112,31 @@ pub trait InputHighlighter {
         1.0
     }
 
+    /// The table row the buffer line covering `line_range` is, if it is one.
+    ///
+    /// A GFM pipe table is laid out by the engine as one shaped segment per
+    /// cell, so it needs the row's segmentation: which bytes of the line are
+    /// which cell. That is the application's parser's business, and it is the
+    /// *same* segmentation the application writes through, or the grid and
+    /// the write path disagree on a byte.
+    ///
+    /// Asked at wrap time, inside the edit, with `text` as it will be after
+    /// the edit: the answer must come from that text, never from a syntax
+    /// tree that is updated later. `generation` changes once per rebuild, so
+    /// an implementation can cache one table's shape across the rows of that
+    /// rebuild rather than parse the table once per row.
+    ///
+    /// Default: no line is a table row.
+    fn table_row(
+        &self,
+        line_range: &Range<usize>,
+        text: &Rope,
+        generation: u64,
+    ) -> Option<TableRow> {
+        let _ = (line_range, text, generation);
+        None
+    }
+
     /// Block widgets whose first line is the buffer line covering
     /// `line_range`, e.g. a grid drawn in place of a GFM pipe table.
     ///
@@ -176,6 +201,45 @@ pub enum BlockWidgetKind {
         rows: Vec<Vec<String>>,
         aligns: Vec<ColumnAlign>,
     },
+}
+
+/// One row of a GFM pipe table, as the application segments it for the
+/// engine (see [`InputHighlighter::table_row`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableRow {
+    /// Buffer rows of the table's first line (the header) and its last line.
+    /// Used to rebuild the rows of a table whose shape changed; a row is not
+    /// drawn any differently for being first or last.
+    pub first_row: usize,
+    pub last_row: usize,
+    pub kind: TableRowKind,
+    /// Columns the table has, as its header spells them.
+    pub columns: usize,
+    pub aligns: Vec<ColumnAlign>,
+    /// Exactly `columns` cells, as byte ranges relative to the line start.
+    pub cells: Vec<TableCellSpan>,
+}
+
+/// What a table row is to a reader: the header, the delimiter under it, or a
+/// body row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableRowKind {
+    Header,
+    Delimiter,
+    Body,
+}
+
+/// One cell of a table row, as byte ranges relative to the line start.
+///
+/// `content` is the cell's text without padding -- an empty cell is an empty
+/// range in the middle of its padding, so a keystroke there lands inside the
+/// cell. `separator` is the index of the pipe closing the cell, or the line's
+/// length when there is none; every byte of the line is inside a cell or
+/// between two known separators.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableCellSpan {
+    pub content: Range<usize>,
+    pub separator: usize,
 }
 
 /// Column alignment of a GFM pipe table, as its delimiter row spells it

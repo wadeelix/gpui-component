@@ -11,7 +11,7 @@ use ropey::Rope;
 
 use super::fold_map::FoldMap;
 use super::folding::FoldRange;
-pub use super::text_wrapper::{LineHeightScale, WrappingIndent};
+pub use super::text_wrapper::{LineHeightScale, TableRowSource, WrappingIndent};
 use super::text_wrapper::{LineItem, WrapDisplayPoint};
 use super::wrap_map::WrapMap;
 use super::{BufferPoint, DisplayPoint};
@@ -113,6 +113,24 @@ impl DisplayMap {
     /// Installs the per-line height multiplier; `None` restores uniform rows.
     pub fn set_height_scale(&mut self, scale: Option<LineHeightScale>, cx: &mut App) {
         self.wrap_map.set_height_scale(scale, cx);
+    }
+
+    /// Installs the per-line height multiplier and the table-row source
+    /// together, rebuilding every line once.
+    pub fn set_line_hooks(
+        &mut self,
+        scale: Option<LineHeightScale>,
+        table_rows: Option<TableRowSource>,
+        cx: &mut App,
+    ) {
+        self.wrap_map.set_line_hooks(scale, table_rows, cx);
+    }
+
+    /// Re-lays out the lines covering `range` from the current text, for a
+    /// change that is not an edit: a table row that starts or stops being
+    /// laid out as one, for instance.
+    pub fn rewrap(&mut self, range: Range<usize>, cx: &mut App) {
+        self.wrap_map.rewrap(range, cx);
     }
 
     /// Whether every display row is one base line height tall.
