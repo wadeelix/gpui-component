@@ -194,9 +194,17 @@ impl TableRowLayout {
         k.min(cell.rows.len().saturating_sub(1))
     }
 
-    /// The offset nearest to `pos`, for any point inside the row's height.
+    /// Whether this is a delimiter row collapsed to a sliver under the
+    /// header's rule by the application's height hook: not a place for the
+    /// mouse, and nothing to draw but that rule.
+    fn collapsed(&self) -> bool {
+        self.kind == TableRowKind::Delimiter && self.size().height < px(4.)
+    }
+
+    /// The offset nearest to `pos`, for any point inside the row's height;
+    /// none on a collapsed delimiter row, so the click goes to a neighbour.
     pub(crate) fn closest_index_for_position(&self, pos: Point<Pixels>) -> Option<usize> {
-        if pos.y < px(0.) || pos.y >= self.size().height {
+        if self.collapsed() || pos.y < px(0.) || pos.y >= self.size().height {
             return None;
         }
         let cell_ix = self.column_at(pos.x);
@@ -260,6 +268,9 @@ impl TableRowLayout {
 
     /// The offset of the glyph under `pos`, or `None` off any glyph.
     pub(crate) fn index_for_position(&self, pos: Point<Pixels>) -> Option<usize> {
+        if self.collapsed() {
+            return None;
+        }
         if pos.y < px(0.) || pos.y >= self.size().height {
             return None;
         }
@@ -412,6 +423,9 @@ impl TableRowLayout {
         // under that rule, open it is a row of dashes.
         let border = self.chrome.border;
         let hairline = px(1.);
+        if self.collapsed() {
+            return;
+        }
         for column in &self.columns {
             window.paint_quad(fill(
                 Bounds::new(
