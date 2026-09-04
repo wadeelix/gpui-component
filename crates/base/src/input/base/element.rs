@@ -369,7 +369,7 @@ pub(super) fn cursor_surrounding_padding(
 /// `0` outside code-editor mode. Inside it, `None` is half the viewport
 /// (floored at [`BOTTOM_MARGIN_ROWS`] line-heights); `Some(n)` is exactly
 /// `n` line-heights.
-fn empty_bottom_height(
+pub(super) fn empty_bottom_height(
     is_code_editor: bool,
     override_rows: Option<usize>,
     viewport_height: Pixels,
@@ -2314,7 +2314,6 @@ impl<M: InputModeKind> Element for TextElement<M> {
         let ghost_line_count = ghost_lines.len();
         let ghost_lines_height = ghost_line_count as f32 * line_height;
 
-        let total_wrapped_lines = state.display_map.wrap_row_count();
         let empty_bottom_height = empty_bottom_height(
             state.is_code_editor(),
             state.scroll_beyond_last_line,
@@ -2331,7 +2330,10 @@ impl<M: InputModeKind> Element for TextElement<M> {
             } else {
                 longest_line_width
             },
-            (total_wrapped_lines as f32 * line_height
+            // In base line heights, not wrap rows: a scaled heading or a
+            // table row is taller than one row, and a scrollbar built from
+            // the row count stops short of the document's end.
+            (line_height * state.display_map.total_height()
                 + empty_bottom_height.max(ghost_lines_height))
             .max(bounds.size.height),
         );

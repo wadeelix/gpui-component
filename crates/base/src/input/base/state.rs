@@ -1890,8 +1890,10 @@ impl<M: InputModeKind> InputBaseState<M> {
 
         let row = point.row;
 
-        // Calculate row offset by multiplying the number of lines before it with the line height
-        let mut row_offset_y = line_height * self.display_map.buffer_line_to_display_row(row);
+        // The top of the row through the summed heights, so a row below a
+        // taller line is scrolled to where it is drawn, not a fraction of a
+        // row above it.
+        let mut row_offset_y = line_height * self.display_map.buffer_line_top(row);
 
         // For Right alignment use 0 margin: the cursor indicator is clamped inside bounds
         // in layout_cursor, so shifting the text here would cause a first-click visual jump.
@@ -4918,6 +4920,100 @@ mod tests {
                 // Line 2: scaled glyphs are wider, so the second boundary is
                 // at 1.5 glyph widths.
                 assert_eq!(click(1.5 * glyph_w + 0.5, 2.), 16);
+            });
+        });
+    }
+
+    /// The scroll extent and the scroll-to-row arithmetic must go through the
+    /// summed heights, not the row count: with one line drawn 1.5x tall,
+    /// every row below it sits half a row lower than the count says.
+    #[gpui::test]
+    fn scrolling_follows_the_summed_heights_past_a_taller_line(cx: &mut TestAppContext) {
+        // 200 short lines so the document is taller than the window; line 5
+        // is scaled 1.5x.
+        let text: String = (0..200)
+            .map(|i| format!("line {i}\n"))
+            .collect::<Vec<_>>()
+            .join("");
+        let scaled_line_start = text.find("line 5\n").expect("line 5");
+        let input_view = InputView::build_editor(cx, move |state| {
+            state
+                .default_value(text.as_str())
+                .scroll_beyond_last_line(Some(0))
+        });
+        let mut cx = VisualTestContext::from_window(input_view.window_handle.into(), cx);
+        let input = input_view.input;
+
+        let factory: crate::input::InputHighlighterFactory = Rc::new(move |_lang: &str| {
+            Some(Box::new(ConcealHighlighter {
+                conceal: Vec::new(),
+                scaled_line_start: Some(scaled_line_start),
+            }) as Box<dyn crate::input::InputHighlighter>)
+        });
+        cx.update(|_, cx| {
+            input.update(cx, |state, cx| {
+                state.set_highlighter_factory(factory, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        // The highlighter is created lazily on that first render, after the
+        // heights were synced against nothing; an application that installs a
+        // factory on an open document asks for a refresh, and so does this.
+        cx.update(|_, cx| {
+            input.update(cx, |state, cx| state.refresh_line_heights(cx));
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let (line_height, bounds, total_height, top_150) = cx.update(|_, cx| {
+            input.read_with(cx, |state, _| {
+                let layout = state.last_layout.as_ref().expect("layout");
+                (
+                    layout.line_height,
+                    state.last_bounds.expect("bounds"),
+                    state.display_map.total_height(),
+                    state.display_map.buffer_line_top(150),
+                )
+            })
+        });
+        assert_eq!(total_height, 201.5, "one line is half a row taller");
+        assert_eq!(top_150, 150.5);
+
+        cx.update(|_, cx| {
+            input.read_with(cx, |state, _| {
+                let close = |a: Pixels, b: Pixels| (f32::from(a) - f32::from(b)).abs() < 0.01;
+                assert!(
+                    close(state.scroll_size.height, line_height * total_height),
+                    "scroll extent {:?} vs summed heights {:?}",
+                    state.scroll_size.height,
+                    line_height * total_height
+                );
+            });
+        });
+
+        // Scrolling to a row below the taller line lands on where that row is
+        // drawn: half a row lower than its index says.
+        let offset_150 =
+            cx.update(|_, cx| input.read_with(cx, |state, _| state.text.line_start_offset(150)));
+        cx.update(|_, cx| {
+            input.update(cx, |state, cx| state.scroll_to(offset_150, None, cx));
+        });
+        // The test harness draws at the end of the update, which applies the
+        // deferred target and stores the result on the scroll handle.
+        cx.update(|_, cx| {
+            input.read_with(cx, |state, _| {
+                let scrolled = state.scroll_handle.offset();
+                let expected = -(line_height * top_150 - bounds.size.height + line_height);
+                assert!(
+                    (f32::from(scrolled.y) - f32::from(expected)).abs() < 0.01,
+                    "scrolled to {:?}, expected {:?}",
+                    scrolled.y,
+                    expected
+                );
             });
         });
     }
