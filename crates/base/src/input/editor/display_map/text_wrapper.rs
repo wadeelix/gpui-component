@@ -861,6 +861,9 @@ pub(crate) struct LineLayout {
     pub(crate) height_scale: f32,
     /// Widgets drawn over this line, with ranges relative to the line start.
     pub(crate) widgets: Vec<crate::input::InlineWidget>,
+    /// Set when this line is a table row laid out per cell; every geometry
+    /// question is then answered by it.
+    pub(crate) table: Option<Box<crate::input::table_layout::TableRowLayout>>,
 }
 
 impl LineLayout {
@@ -875,6 +878,22 @@ impl LineLayout {
             wrap_indent: px(0.),
             whitespace_chars: Vec::new(),
             whitespace_indicators: None,
+            table: None,
+        }
+    }
+
+    /// Lays this line out as a table row: the accessors answer per cell.
+    pub(crate) fn with_table(mut self, table: crate::input::table_layout::TableRowLayout) -> Self {
+        self.table = Some(Box::new(table));
+        self
+    }
+
+    /// Height of the row the caret sits in: a text row inside a table row,
+    /// the whole row otherwise.
+    pub(crate) fn caret_row_height(&self, line_height: Pixels) -> Pixels {
+        match &self.table {
+            Some(table) => table.text_row_height,
+            None => self.row_height(line_height),
         }
     }
 
@@ -974,6 +993,9 @@ impl LineLayout {
     /// Raw bytes length of this line (display length plus concealed bytes).
     #[inline]
     pub(crate) fn len(&self) -> usize {
+        if let Some(table) = &self.table {
+            return table.len;
+        }
         self.display_len + self.concealed.iter().map(|r| r.len()).sum::<usize>()
     }
 
@@ -1011,6 +1033,9 @@ impl LineLayout {
         last_layout: &LastLayout,
         line_end_affinity: bool,
     ) -> Option<Point<Pixels>> {
+        if let Some(table) = &self.table {
+            return table.position_for_index(offset, line_end_affinity);
+        }
         // Work in display space: the shaped lines do not contain concealed bytes.
         let offset = self.raw_to_display(offset);
         let mut acc_len = 0;
@@ -1052,6 +1077,9 @@ impl LineLayout {
     ///
     /// The return value is a raw (buffer) byte offset relative to the line start.
     pub(crate) fn closest_index_for_x(&self, x: Pixels, last_layout: &LastLayout) -> usize {
+        if let Some(table) = &self.table {
+            return table.closest_index_for_x(x);
+        }
         let mut acc_len = 0;
         let x_offset = last_layout.alignment_offset(self.longest_width);
         let x = x - x_offset;
@@ -1084,6 +1112,9 @@ impl LineLayout {
         pos: Point<Pixels>,
         last_layout: &LastLayout,
     ) -> Option<usize> {
+        if let Some(table) = &self.table {
+            return table.closest_index_for_position(pos);
+        }
         let mut offset = 0;
         let mut line_top = px(0.);
         let x_offset = last_layout.alignment_offset(self.longest_width);
@@ -1116,6 +1147,9 @@ impl LineLayout {
         pos: Point<Pixels>,
         last_layout: &LastLayout,
     ) -> Option<usize> {
+        if let Some(table) = &self.table {
+            return table.index_for_position(pos);
+        }
         let mut offset = 0;
         let mut line_top = px(0.);
         let x_offset = last_layout.alignment_offset(self.longest_width);
@@ -1134,6 +1168,9 @@ impl LineLayout {
     }
 
     pub(crate) fn size(&self, line_height: Pixels) -> Size<Pixels> {
+        if let Some(table) = &self.table {
+            return table.size();
+        }
         let width = self
             .wrapped_lines
             .iter()
@@ -1161,6 +1198,10 @@ impl LineLayout {
         window: &mut Window,
         cx: &mut App,
     ) {
+        if let Some(table) = &self.table {
+            table.paint(pos, window, cx);
+            return;
+        }
         for (ix, line) in self.wrapped_lines.iter().enumerate() {
             _ = line.paint(
                 pos + point(self.line_indent(ix), self.row_height(line_height) * ix),
@@ -1214,7 +1255,7 @@ pub(crate) fn normalize_concealed(mut concealed: Vec<Range<usize>>) -> Vec<Range
 
 /// Translate a raw byte offset to a display byte offset, given the sorted,
 /// non-overlapping `concealed` raw ranges. See [`LineLayout::raw_to_display`].
-fn raw_to_display(concealed: &[Range<usize>], raw: usize) -> usize {
+pub(crate) fn raw_to_display(concealed: &[Range<usize>], raw: usize) -> usize {
     let mut removed = 0;
     for r in concealed {
         if raw < r.start {
@@ -1231,7 +1272,7 @@ fn raw_to_display(concealed: &[Range<usize>], raw: usize) -> usize {
 
 /// Translate a display byte offset back to a raw byte offset, given the sorted,
 /// non-overlapping `concealed` raw ranges. See [`LineLayout::display_to_raw`].
-fn display_to_raw(concealed: &[Range<usize>], display: usize) -> usize {
+pub(crate) fn display_to_raw(concealed: &[Range<usize>], display: usize) -> usize {
     let mut removed = 0;
     for r in concealed {
         // Display position at which this concealed range was removed.

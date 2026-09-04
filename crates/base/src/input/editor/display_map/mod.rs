@@ -16,7 +16,10 @@ mod wrap_map;
 
 // Re-export public API
 pub use self::display_map::{DisplayMap, LineHeightScale, TableRowSource, WrappingIndent};
-pub(crate) use self::text_wrapper::{LineLayout, normalize_concealed};
+pub(crate) use self::table_row::{CELL_PAD, TableRowItem};
+pub(crate) use self::text_wrapper::{
+    LineLayout, display_to_raw, normalize_concealed, raw_to_display,
+};
 
 // Re-export FoldRange and extract_fold_ranges
 pub use folding::FoldRange;

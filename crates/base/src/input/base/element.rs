@@ -29,7 +29,6 @@ use super::{
     layout::{LastLayout, WhitespaceIndicators},
     mode::LayoutMode,
 };
-use crate::input::block_widget::{BlockWidgetPlacement, layout_block_widgets};
 
 fn diagnostic_highlight_style(
     severity: crate::input::DiagnosticSeverity,
@@ -649,7 +648,13 @@ impl<M: InputModeKind> TextElement<M> {
 
             // cursor bounds. The caret is sized to the row it sits on, so it
             // grows with a heading instead of staying a body-text sliver.
-            let cursor_row_height = line_height * state.display_map.line_height_scale(cursor_row);
+            // Inside a table row the caret is one text row tall, not the
+            // whole row; the layout knows which.
+            let cursor_row_height = visible_buffer_lines
+                .iter()
+                .position(|&bl| bl == cursor_row)
+                .map(|vi| lines[vi].caret_row_height(line_height))
+                .unwrap_or_else(|| line_height * state.display_map.line_height_scale(cursor_row));
             let cursor_height = 0.85 * cursor_row_height;
 
             // Match the caret to the deferred scroll target (applied below) that
@@ -743,6 +748,31 @@ impl<M: InputModeKind> TextElement<M> {
             let line_wrap_width = line_size.width;
 
             let line_origin = point(px(0.), offset_y);
+
+            // A table row answers for itself: text inside one cell, whole
+            // cells past it.
+            if let Some(table) = &line.table {
+                let line_end = prev_lines_offset + line.len();
+                if start_ix <= line_end && end_ix >= prev_lines_offset {
+                    let starts_before = start_ix < prev_lines_offset;
+                    let ends_after = end_ix > line_end;
+                    let local = start_ix.saturating_sub(prev_lines_offset).min(line.len())
+                        ..end_ix.min(line_end) - prev_lines_offset;
+                    for corners in table.selection_corners(local, starts_before, ends_after) {
+                        line_corners.push(Corners {
+                            top_left: line_origin + corners.top_left,
+                            top_right: line_origin + corners.top_right,
+                            bottom_left: line_origin + corners.bottom_left,
+                            bottom_right: line_origin + corners.bottom_right,
+                        });
+                    }
+                }
+                if end_ix <= line_end {
+                    break;
+                }
+                offset_y += line_size.height;
+                continue;
+            }
 
             let line_cursor_start = line.position_for_index(
                 start_ix.saturating_sub(prev_lines_offset),
@@ -1554,7 +1584,7 @@ impl<M: InputModeKind> TextElement<M> {
         bg_segments: &[(Range<usize>, Hsla)],
         whitespace_indicators: Option<WhitespaceIndicators>,
         window: &mut Window,
-    ) -> (Vec<LineLayout>, Vec<BlockWidgetPlacement>) {
+    ) -> Vec<LineLayout> {
         let is_single_line = state.is_single_line();
 
         if is_single_line {
@@ -1568,7 +1598,7 @@ impl<M: InputModeKind> TextElement<M> {
             let line_layout = LineLayout::new()
                 .lines(smallvec::smallvec![shaped_line])
                 .with_whitespaces(whitespace_indicators);
-            return (vec![line_layout], Vec::new());
+            return vec![line_layout];
         }
 
         // Empty to use placeholder, the placeholder is not in the wrapper map.
@@ -1590,18 +1620,10 @@ impl<M: InputModeKind> TextElement<M> {
             let line_layout = LineLayout::new()
                 .lines(placeholder_lines)
                 .with_whitespaces(whitespace_indicators);
-            return (vec![line_layout], Vec::new());
+            return vec![line_layout];
         }
 
         let mut lines = Vec::with_capacity(last_layout.visible_buffer_lines.len());
-        // Block widgets found while walking the visible lines, each with the
-        // index of the line it starts on so painting can place it.
-        let mut block_widgets: Vec<BlockWidgetPlacement> = Vec::new();
-        // Byte offset one past the block widget currently standing in for a run
-        // of lines, if any. Lines that start before it are laid out with no
-        // text: the widget is drawn over them, and their buffer offsets stay
-        // addressable through the usual concealment path.
-        let mut block_covers_to: Option<usize> = None;
         // run_offset tracks position in the runs vec coordinate space (only visible line bytes).
         // This is separate from the visible_text offset because runs from highlight_lines
         // only cover visible (non-folded) lines.
@@ -1630,12 +1652,13 @@ impl<M: InputModeKind> TextElement<M> {
 
             debug_assert_eq!(line_item.len(), line_text.len());
 
+            let line_start = last_layout.visible_line_byte_offsets[vi];
+            let line_range = line_start..line_start + line_text.len();
+
             // Raw byte ranges (relative to the line start) hidden from display,
             // and the font-size multiplier for this line.
             let (concealed, line_font_size, widgets) = match highlighter {
                 Some(highlighter) => {
-                    let line_start = last_layout.visible_line_byte_offsets[vi];
-                    let line_range = line_start..line_start + line_text.len();
                     let concealed =
                         line_conceals(highlighter.conceals(&line_range), &line_range, &line_text);
                     let scale = highlighter.line_font_scale(&line_range);
@@ -1665,106 +1688,60 @@ impl<M: InputModeKind> TextElement<M> {
                 None => (Vec::new(), font_size, Vec::new()),
             };
 
-            // A block widget claims this line and the ones its range runs over.
-            // It is reported on its first line, so ask only on lines that are
-            // not already covered by one.
-            //
-            // The first line may be above the viewport — a table scrolled
-            // half off the top is the ordinary case — so a widget whose range
-            // merely reaches into this line counts too. Its placement is then
-            // this line, which is the first one actually drawn.
-            let line_start = last_layout.visible_line_byte_offsets[vi];
-            let line_range = line_start..line_start + line_text.len();
-            if block_covers_to.is_some_and(|end| line_range.start >= end) {
-                block_covers_to = None;
-            }
-            if block_covers_to.is_none()
-                && let Some(highlighter) = highlighter
-                && let Some(widget) = highlighter
-                    .block_widgets(&line_range)
-                    .into_iter()
-                    .find(|widget| widget.range.end > line_range.start)
+            // A table row is laid out per cell, from the ranges the display
+            // map wrapped each cell to. The line keeps one empty shaped row so
+            // the code that walks rows finds one; every geometry question is
+            // answered by the table layout instead.
+            if let (Some(item), Some(wrap_width)) =
+                (line_item.table.as_ref(), last_layout.wrap_width)
             {
-                block_covers_to = Some(widget.range.end);
-                // How many of the widget's lines are already above this one:
-                // the newlines between where it starts and where drawing
-                // resumes.
-                let rows_skipped = display_text
-                    .slice(widget.range.start..line_range.start.max(widget.range.start))
-                    .chars()
-                    .filter(|c| *c == '\n')
-                    .count();
-                block_widgets.push(BlockWidgetPlacement {
-                    line_index: vi,
-                    // Grown as the lines it covers are walked.
-                    line_count: 1,
-                    rows_skipped,
-                    widget,
-                });
-            }
-            // Every line the widget covers, its own first one included: the
-            // widget is drawn instead of the text, not over it, so shaping any
-            // of it would leave the source showing through the grid.
-            let covered_by_block = block_covers_to.is_some_and(|end| line_range.end <= end);
-            if covered_by_block
-                && let Some(placement) = block_widgets.last_mut()
-                && placement.line_index != vi
-            {
-                placement.line_count += 1;
+                let table = Self::layout_table_row(
+                    state,
+                    item,
+                    buffer_line,
+                    line_start,
+                    &line_text,
+                    &concealed,
+                    line_font_size,
+                    runs,
+                    run_offset,
+                    bg_segments,
+                    wrap_width,
+                    last_layout,
+                    window,
+                );
+                let empty = window.text_system().shape_line(
+                    SharedString::default(),
+                    line_font_size,
+                    &[],
+                    None,
+                );
+                lines.push(
+                    LineLayout::new()
+                        .lines(smallvec::smallvec![empty])
+                        .with_height_scale(state.display_map.line_height_scale(buffer_line))
+                        .with_widgets(widgets)
+                        .with_concealed(concealed)
+                        .with_table(table),
+                );
+                run_offset += line_text.len() + 1;
+                continue;
             }
 
             let mut wrapped_lines: SmallVec<[ShapedLine; 1]> = SmallVec::with_capacity(1);
-
-            // A line under a block widget keeps its rows but draws no glyphs:
-            // the widget stands in for the text, and shaping what nobody can
-            // see would only cost time on the keystroke path.
-            //
-            // The rows have to stay. Their height is what pushes the text after
-            // the block down past it, and they are what hit-testing searches to
-            // turn a click into a buffer offset — drop them and the following
-            // prose lands on top of the widget while the caret jumps somewhere
-            // else entirely.
-            if covered_by_block {
-                for _ in &line_item.wrapped_lines {
-                    wrapped_lines.push(window.text_system().shape_line(
-                        SharedString::default(),
-                        line_font_size,
-                        &[],
-                        None,
-                    ));
-                }
-            }
-            for range in if covered_by_block {
-                &[][..]
-            } else {
-                &line_item.wrapped_lines[..]
-            } {
-                let line_runs = runs_for_range(runs, run_offset, &range);
-                let line_runs = if bg_segments.is_empty() {
-                    line_runs
-                } else {
-                    split_runs_by_bg_segments(
-                        last_layout.visible_line_byte_offsets[vi] + (range.start),
-                        &line_runs,
-                        bg_segments,
-                    )
-                };
-
-                // The shaped (display) text is the raw wrapped range with the
-                // concealed bytes removed; runs shrink accordingly.
-                let (sub_line, line_runs): (SharedString, Vec<TextRun>) = if concealed.is_empty() {
-                    (line_text[range.clone()].to_string().into(), line_runs)
-                } else {
-                    conceal_wrapped_line(&line_text, range, &concealed, line_runs)
-                };
-                let line_runs =
-                    align_runs_to_char_boundaries(&sub_line, &line_runs).unwrap_or(line_runs);
-                let shaped_line =
-                    window
-                        .text_system()
-                        .shape_line(sub_line, line_font_size, &line_runs, None);
-
-                wrapped_lines.push(shaped_line);
+            for range in &line_item.wrapped_lines[..] {
+                wrapped_lines.push(Self::shape_wrapped_range(
+                    &line_text,
+                    range,
+                    &concealed,
+                    runs,
+                    run_offset,
+                    bg_segments,
+                    line_start,
+                    line_font_size,
+                    false,
+                    window,
+                ));
             }
 
             let line_layout = LineLayout::new()
@@ -1795,7 +1772,163 @@ impl<M: InputModeKind> TextElement<M> {
             run_offset += line_text.len() + 1;
         }
 
-        (lines, block_widgets)
+        lines
+    }
+
+    /// Shapes one wrapped range of a line: its runs, its background segments,
+    /// with the concealed bytes removed. `bold` is for a table header.
+    #[allow(clippy::too_many_arguments)]
+    fn shape_wrapped_range(
+        line_text: &str,
+        range: &Range<usize>,
+        concealed: &[Range<usize>],
+        runs: &[TextRun],
+        run_offset: usize,
+        bg_segments: &[(Range<usize>, Hsla)],
+        line_start: usize,
+        font_size: Pixels,
+        bold: bool,
+        window: &mut Window,
+    ) -> ShapedLine {
+        let line_runs = runs_for_range(runs, run_offset, range);
+        let line_runs = if bg_segments.is_empty() {
+            line_runs
+        } else {
+            split_runs_by_bg_segments(line_start + range.start, &line_runs, bg_segments)
+        };
+
+        // The shaped (display) text is the raw wrapped range with the
+        // concealed bytes removed; runs shrink accordingly.
+        let (sub_line, line_runs): (SharedString, Vec<TextRun>) = if concealed.is_empty() {
+            (line_text[range.clone()].to_string().into(), line_runs)
+        } else {
+            conceal_wrapped_line(line_text, range, concealed, line_runs)
+        };
+        let mut line_runs =
+            align_runs_to_char_boundaries(&sub_line, &line_runs).unwrap_or(line_runs);
+        if bold {
+            for run in &mut line_runs {
+                run.font.weight = gpui::FontWeight::BOLD;
+            }
+        }
+        window
+            .text_system()
+            .shape_line(sub_line, font_size, &line_runs, None)
+    }
+
+    /// Lays a table row out per cell: each cell's wrapped ranges shaped like
+    /// prose and placed in equal columns across the wrap width. The ranges
+    /// are the ones the display map wrapped, so what is drawn is what was
+    /// reserved.
+    #[allow(clippy::too_many_arguments)]
+    fn layout_table_row(
+        state: &InputBaseState<M>,
+        item: &crate::input::display_map::TableRowItem,
+        buffer_line: usize,
+        line_start: usize,
+        line_text: &str,
+        concealed: &[Range<usize>],
+        line_font_size: Pixels,
+        runs: &[TextRun],
+        run_offset: usize,
+        bg_segments: &[(Range<usize>, Hsla)],
+        wrap_width: Pixels,
+        last_layout: &LastLayout,
+        window: &mut Window,
+    ) -> crate::input::table_layout::TableRowLayout {
+        use crate::input::TableRowKind;
+        use crate::input::table_layout::{CellLayout, ColumnGeometry, TableChrome, TableRowLayout};
+
+        let column_count = item.columns.max(1);
+        let column_width = wrap_width / column_count as f32;
+        let columns = (0..column_count)
+            .map(|c| ColumnGeometry {
+                x: column_width * c as f32,
+                width: column_width,
+            })
+            .collect();
+        let header = item.kind == TableRowKind::Header;
+        let cells = item
+            .cells
+            .iter()
+            .zip(item.cell_lines.iter())
+            .enumerate()
+            .map(|(c, (span, rows))| CellLayout {
+                content: span.content.clone(),
+                separator: span.separator,
+                rows: rows.clone(),
+                lines: rows
+                    .iter()
+                    .map(|range| {
+                        Self::shape_wrapped_range(
+                            line_text,
+                            range,
+                            concealed,
+                            runs,
+                            run_offset,
+                            bg_segments,
+                            line_start,
+                            line_font_size,
+                            header,
+                            window,
+                        )
+                    })
+                    .collect(),
+                align: item.aligns.get(c).copied().unwrap_or_default(),
+            })
+            .collect();
+
+        // The line's height is `text scale × rows`; one text row is its share.
+        let rows = item.rows.max(1);
+        let text_row_height = last_layout.line_height
+            * state.display_map.line_height_scale(buffer_line)
+            / rows as f32;
+        let neighbour_is_table = |row: Option<usize>| {
+            row.and_then(|r| state.display_map.line(r))
+                .is_some_and(|line| line.table.is_some())
+        };
+        let style = &state.editor_style;
+        let mut layout = TableRowLayout {
+            kind: item.kind,
+            columns,
+            cells,
+            concealed: concealed.to_vec(),
+            text_row_height,
+            rows,
+            width: wrap_width,
+            len: line_text.len(),
+            focused: None,
+            first: !neighbour_is_table(buffer_line.checked_sub(1)),
+            chrome: TableChrome {
+                border: style.border,
+                header_background: style.muted_foreground.opacity(0.08),
+                focused_background: style
+                    .editor_active_line
+                    .unwrap_or(style.border.opacity(0.15)),
+            },
+        };
+
+        // The cell the selection lies inside, when both of its ends do: the
+        // one the application reveals, outlined so the writer sees which.
+        let selection = state.selected_range;
+        let line_end = line_start + line_text.len();
+        if selection.start >= line_start && selection.end <= line_end {
+            let (start_cell, _) = layout.cell_of(selection.start - line_start);
+            let (end_cell, _) = layout.cell_of(selection.end - line_start);
+            let inside = |cell: usize, offset: usize| {
+                layout
+                    .cells
+                    .get(cell)
+                    .is_some_and(|c| c.content.start <= offset && offset <= c.content.end)
+            };
+            if start_cell == end_cell
+                && inside(start_cell, selection.start - line_start)
+                && inside(end_cell, selection.end - line_start)
+            {
+                layout.focused = Some(start_cell);
+            }
+        }
+        layout
     }
 
     /// First usize is the offset of skipped.
@@ -1966,8 +2099,6 @@ pub(super) struct PrepaintState {
     current_row: Option<usize>,
     /// Prepainted inline widgets, drawn over the text they stand for.
     inline_widgets: Vec<InlineWidgetLayout>,
-    /// Prepainted block widgets, drawn over the lines they stand for.
-    block_widgets: Vec<InlineWidgetLayout>,
     selection_path: Option<Path<Pixels>>,
     hover_highlight_path: Option<Path<Pixels>>,
     search_match_paths: Vec<(Path<Pixels>, bool)>,
@@ -2268,7 +2399,7 @@ impl<M: InputModeKind> Element for TextElement<M> {
         let whitespace_indicators =
             Self::layout_whitespace_indicators(&state, text_size, &text_style, window, cx);
 
-        let (lines, block_placements) = Self::layout_lines(
+        let lines = Self::layout_lines(
             &state,
             &display_text,
             &last_layout,
@@ -2457,20 +2588,11 @@ impl<M: InputModeKind> Element for TextElement<M> {
         let fold_icon_layout =
             self.layout_fold_icons(original_x, &bounds, &last_layout, window, cx);
         let inline_widgets = self.layout_inline_widgets(&bounds, &last_layout, window, cx);
-        let block_widgets = layout_block_widgets(
-            &self.state,
-            &block_placements,
-            &bounds,
-            &last_layout,
-            window,
-            cx,
-        );
 
         PrepaintState {
             bounds,
             last_layout,
             inline_widgets,
-            block_widgets,
             scroll_size,
             line_numbers,
             cursor_bounds,
@@ -2784,12 +2906,6 @@ impl<M: InputModeKind> Element for TextElement<M> {
         // listener registered later is offered the event first: painted before
         // them, a checkbox was drawn correctly but never saw its click — the
         // editor took it and moved the caret instead.
-        //
-        // Block widgets still come before the inline ones, so a checkbox inside
-        // a block is not buried under its grid.
-        for widget in prepaint.block_widgets.iter_mut() {
-            widget.element.paint(window, cx);
-        }
         for widget in prepaint.inline_widgets.iter_mut() {
             widget.element.paint(window, cx);
         }
@@ -3176,12 +3292,12 @@ mod tests {
         assert_eq!(concealed_row.bottom_left.y, px(40.));
     }
 
-    /// A line standing in for a block widget shapes to one empty line and
-    /// records no conceal at all, so both of its ends resolve to the same
-    /// point. Left alone that draws a 6px sliver, while a copy takes the whole
-    /// line -- the highlight has to cover what the clipboard will get.
+    /// A line that shaped to nothing -- concealed away entirely -- records
+    /// one empty row, so both of its ends resolve to the same point. Left
+    /// alone that draws a 6px sliver, while a copy takes the whole line -- the
+    /// highlight has to cover what the clipboard will get.
     #[test]
-    fn a_selection_fills_the_row_of_a_line_drawn_as_a_block_widget() {
+    fn a_selection_fills_the_row_of_a_line_that_shaped_to_nothing() {
         use crate::input::EditorMode;
         use crate::input::WrappingIndent;
         use gpui::ShapedLine;

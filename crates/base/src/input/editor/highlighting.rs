@@ -136,26 +136,6 @@ pub trait InputHighlighter {
         let _ = (line_range, text, generation);
         None
     }
-
-    /// Block widgets whose first line is the buffer line covering
-    /// `line_range`, e.g. a grid drawn in place of a GFM pipe table.
-    ///
-    /// Where an [`InlineWidget`] is drawn *over* a span inside one line, a
-    /// block widget stands in for a run of whole lines: the engine gives it the
-    /// full width and the height that [`InputHighlighter::line_height_scale`]
-    /// asked for on that first line, and skips laying out the lines it covers.
-    /// The text underneath is still in the buffer — conceal it from
-    /// [`InputHighlighter::conceals`] if it should not show through, which
-    /// keeps the caret-line rule in one place.
-    ///
-    /// Queried once per visible line on every layout, like the inline variant,
-    /// so an implementation must be as cheap as `conceals` is.
-    ///
-    /// Default: no widgets.
-    fn block_widgets(&self, line_range: &Range<usize>) -> Vec<BlockWidget> {
-        let _ = line_range;
-        Vec::new()
-    }
 }
 
 /// A widget drawn in place of a range of text (see
@@ -174,33 +154,6 @@ pub struct InlineWidget {
 pub enum InlineWidgetKind {
     /// A GFM task checkbox. Clicking it asks the application to toggle.
     Checkbox { checked: bool },
-}
-
-/// A widget drawn in place of a run of whole lines (see
-/// [`InputHighlighter::block_widgets`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BlockWidget {
-    /// Raw byte range in the buffer that this widget stands for. It starts on
-    /// the line the widget was reported for and may run over later lines; those
-    /// lines are not laid out as text while it is drawn.
-    pub range: Range<usize>,
-    pub kind: BlockWidgetKind,
-}
-
-/// What a [`BlockWidget`] draws. Closed for the same reason
-/// [`InlineWidgetKind`] is: block widgets are built during `prepaint`, where an
-/// application-supplied closure has nowhere safe to produce an element from.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BlockWidgetKind {
-    /// A GFM pipe table, already split into rows of cells. The header is kept
-    /// apart from the body because it is the one row a reader treats as a
-    /// label, and the alignments are per column, as the delimiter row spells
-    /// them.
-    Table {
-        header: Vec<String>,
-        rows: Vec<Vec<String>>,
-        aligns: Vec<ColumnAlign>,
-    },
 }
 
 /// One row of a GFM pipe table, as the application segments it for the
@@ -337,10 +290,10 @@ mod tests {
         }
     }
 
-    /// Block widgets are opt-in: a highlighter written before the hook existed
-    /// keeps laying its lines out as text.
+    /// Table rows are opt-in: a highlighter written before the hook existed
+    /// keeps laying every line out as prose.
     #[test]
-    fn a_highlighter_that_ignores_the_hook_reports_no_block_widgets() {
-        assert!(Bare.block_widgets(&(0..10)).is_empty());
+    fn a_highlighter_that_ignores_the_hook_reports_no_table_rows() {
+        assert!(Bare.table_row(&(0..10), &Rope::from("| a |"), 0).is_none());
     }
 }

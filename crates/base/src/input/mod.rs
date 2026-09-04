@@ -13,8 +13,6 @@ pub(crate) const MASK_CHAR: char = '•';
 mod base;
 #[path = "base/blink_cursor.rs"]
 pub(crate) mod blink_cursor;
-#[path = "base/block_widget.rs"]
-mod block_widget;
 #[path = "base/change.rs"]
 mod change;
 #[path = "base/cursor.rs"]
@@ -55,6 +53,8 @@ mod search;
 mod selection;
 #[path = "base/state.rs"]
 mod state;
+#[path = "base/table_layout.rs"]
+mod table_layout;
 mod textarea;
 #[path = "base/undo_manager.rs"]
 mod undo_manager;
@@ -77,9 +77,9 @@ pub use display_map::{
 };
 pub use editor::{Editor, EditorState};
 pub use highlighting::{
-    BlockWidget, BlockWidgetKind, ColumnAlign, DiagnosticColors, FoldIconRenderer,
-    HighlightStyleResolver, InlineWidget, InlineWidgetKind, InputEditorStyle, InputHighlighter,
-    InputHighlighterFactory, SharedHighlightStyleResolver, TableCellSpan, TableRow, TableRowKind,
+    ColumnAlign, DiagnosticColors, FoldIconRenderer, HighlightStyleResolver, InlineWidget,
+    InlineWidgetKind, InputEditorStyle, InputHighlighter, InputHighlighterFactory,
+    SharedHighlightStyleResolver, TableCellSpan, TableRow, TableRowKind,
 };
 pub use indent::TabSize;
 pub use input::{Input, InputState};
