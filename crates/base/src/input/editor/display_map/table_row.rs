@@ -71,6 +71,13 @@ impl TableRowItem {
             let content = clamp_to_line(line, &cell.content);
             let text = &line[content.clone()];
             let mut ranges: SmallVec<[Range<usize>; 1]> = SmallVec::new();
+            // A delimiter row's dashes are as long as the column is wide in
+            // the source, and never wrap: collapsed, the row must stay one
+            // sliver tall; open, a clipped run of dashes reads fine.
+            if row.kind == TableRowKind::Delimiter {
+                cell_lines.push(smallvec::smallvec![content]);
+                continue;
+            }
             let mut prev = 0;
             for boundary in wrap_line(text, width) {
                 if boundary.ix > prev && boundary.ix <= text.len() {
@@ -215,6 +222,16 @@ mod tests {
             "the first cell's rows, relative to the line"
         );
         assert_eq!(item.cell_lines[1].as_slice(), &[12..13]);
+    }
+
+    #[test]
+    fn a_delimiter_row_never_wraps_however_long_its_dashes() {
+        let line = "| ------------------------ | -------- |";
+        let mut delimiter = row(line, 2);
+        delimiter.kind = TableRowKind::Delimiter;
+        let item = TableRowItem::build(&delimiter, line, px(100.), &mut wrap_every);
+        assert_eq!(item.rows, 1);
+        assert_eq!(item.cell_lines[0].len(), 1);
     }
 
     #[test]

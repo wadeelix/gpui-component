@@ -1,5 +1,5 @@
 use crate::input::InputModeKind;
-use gpui::{Context, Point, Window};
+use gpui::{Context, Pixels, Point, Window};
 
 use crate::input::{
     InputBaseState, MoveDown, MoveEnd, MoveHome, MoveLeft, MovePageDown, MovePageUp, MoveRight,
@@ -15,23 +15,16 @@ pub(crate) enum MoveDirection {
 impl<M: InputModeKind> InputBaseState<M> {
     /// Called after moving the cursor. Updates preferred_column if we know where the cursor now is.
     pub(super) fn update_preferred_column(&mut self) {
-        let Some(last_layout) = &self.last_layout else {
-            self.preferred_column = None;
-            return;
-        };
+        self.preferred_column = self.preferred_column_at(self.cursor());
+    }
 
-        let point = self.text.offset_to_point(self.cursor());
-        let Some(line) = last_layout.line(point.row) else {
-            self.preferred_column = None;
-            return;
-        };
-
-        let Some(pos) = line.position_for_index(point.column, last_layout, false) else {
-            self.preferred_column = None;
-            return;
-        };
-
-        self.preferred_column = Some((pos.x, point.column));
+    /// The x and column of `offset` on the last frame, if it was drawn.
+    fn preferred_column_at(&self, offset: usize) -> Option<(Pixels, usize)> {
+        let last_layout = self.last_layout.as_ref()?;
+        let point = self.text.offset_to_point(offset);
+        let line = last_layout.line(point.row)?;
+        let pos = line.position_for_index(point.column, last_layout, false)?;
+        Some((pos.x, point.column))
     }
 
     /// Move the cursor to the given offset.
@@ -57,28 +50,22 @@ impl<M: InputModeKind> InputBaseState<M> {
         cx.notify()
     }
 
-    /// Move the cursor vertically by one line (up or down) while preserving the column if possible.
+    /// The offset `move_lines` rows from `offset`, at the preferred x when
+    /// there is one: what Up, Down and their selecting forms land on.
     ///
-    /// move_lines: Number of lines to move vertically (positive for down, negative for up).
-    pub(super) fn move_vertical(
-        &mut self,
+    /// A table row is one wrap row of several text rows: inside a cell the
+    /// caret moves by text row, and leaves the table row only from the
+    /// cell's first or last one (Word). Otherwise it moves by display row;
+    /// Up into a table row lands on its last text row, as it would on the
+    /// last wrap row of prose.
+    fn vertical_offset(
+        &self,
+        offset: usize,
         move_lines: isize,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.is_single_line() {
-            return;
-        }
-        let Some(last_layout) = &self.last_layout else {
-            return;
-        };
+        preferred: Option<(Pixels, usize)>,
+    ) -> Option<usize> {
+        let last_layout = self.last_layout.as_ref()?;
 
-        let offset = self.cursor();
-        let was_preferred_column = self.preferred_column;
-
-        // A table row is one wrap row of several text rows: inside a cell the
-        // caret moves by text row, and leaves the table row only from the
-        // cell's first or last one (Word).
         if move_lines.abs() == 1 {
             let point = self.text.offset_to_point(offset);
             let line_start = self.text.line_start_offset(point.row);
@@ -86,23 +73,12 @@ impl<M: InputModeKind> InputBaseState<M> {
                 line.table.as_ref()?.step_text_row(
                     offset.checked_sub(line_start)?,
                     move_lines < 0,
-                    was_preferred_column.map(|(x, _)| x),
+                    preferred.map(|(x, _)| x),
                     self.cursor_line_end_affinity,
                 )
             });
             if let Some(local) = inside {
-                let direction = if move_lines < 0 {
-                    MoveDirection::Up
-                } else {
-                    MoveDirection::Down
-                };
-                self.pause_blink_cursor(cx);
-                self.move_to(line_start + local, Some(direction), cx);
-                if was_preferred_column.is_some() {
-                    self.preferred_column = was_preferred_column;
-                }
-                cx.notify();
-                return;
+                return Some(line_start + local);
             }
         }
 
@@ -129,7 +105,7 @@ impl<M: InputModeKind> InputBaseState<M> {
         display_point.column = 0;
         let mut new_offset = self.display_map.wrap_display_point_to_offset(display_point);
 
-        if let Some((preferred_x, column)) = was_preferred_column {
+        if let Some((preferred_x, column)) = preferred {
             // Get display point again to update local_row.
             let mut next_display_point = self.display_map.offset_to_wrap_display_point(new_offset);
             next_display_point.column = 0;
@@ -140,8 +116,6 @@ impl<M: InputModeKind> InputBaseState<M> {
 
             // If in visible range, prefer to use position to get column.
             if let Some(line) = last_layout.line(next_point.row) {
-                // Up into a table row lands on its last text row, as it would
-                // on the last wrap row of prose.
                 let y = match line.table.as_ref() {
                     Some(table) if move_lines < 0 => {
                         table.size().height - table.text_row_height / 2.
@@ -159,6 +133,27 @@ impl<M: InputModeKind> InputBaseState<M> {
                 new_offset = line_start_offset + column.min(max_line_len);
             }
         }
+        Some(new_offset)
+    }
+
+    /// Move the cursor vertically by one line (up or down) while preserving the column if possible.
+    ///
+    /// move_lines: Number of lines to move vertically (positive for down, negative for up).
+    pub(super) fn move_vertical(
+        &mut self,
+        move_lines: isize,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.is_single_line() {
+            return;
+        }
+        let was_preferred_column = self.preferred_column;
+        let Some(new_offset) =
+            self.vertical_offset(self.cursor(), move_lines, was_preferred_column)
+        else {
+            return;
+        };
 
         self.pause_blink_cursor(cx);
         let direction = if move_lines < 0 {
@@ -167,8 +162,32 @@ impl<M: InputModeKind> InputBaseState<M> {
             MoveDirection::Down
         };
         self.move_to(new_offset, Some(direction), cx);
-        // Set back the preferred_column
-        self.preferred_column = was_preferred_column;
+        // Keep the preferred column across repeated presses; without one,
+        // the one `move_to` just took from the new position stands.
+        if was_preferred_column.is_some() {
+            self.preferred_column = was_preferred_column;
+        }
+        cx.notify();
+    }
+
+    /// Extend the selection one row up or down from its head, at the head's
+    /// x, the anchor staying: Shift+Up and Shift+Down as every editor has
+    /// them. Inside a table cell the head moves by text row.
+    pub(super) fn select_vertical(&mut self, move_lines: isize, cx: &mut Context<Self>) {
+        if self.is_single_line() {
+            return;
+        }
+        let head = self.cursor();
+        let preferred = self
+            .preferred_column
+            .or_else(|| self.preferred_column_at(head));
+        let Some(new_offset) = self.vertical_offset(head, move_lines, preferred) else {
+            return;
+        };
+        self.undo_manager.break_transaction_coalescing();
+        self.pause_blink_cursor(cx);
+        self.select_to(new_offset, cx);
+        self.preferred_column = preferred;
         cx.notify();
     }
 

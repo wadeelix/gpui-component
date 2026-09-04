@@ -198,7 +198,7 @@ impl TableRowLayout {
     /// header's rule by the application's height hook: not a place for the
     /// mouse, and nothing to draw but that rule.
     fn collapsed(&self) -> bool {
-        self.kind == TableRowKind::Delimiter && self.size().height < px(4.)
+        self.kind == TableRowKind::Delimiter && self.text_row_height < px(4.)
     }
 
     /// The offset nearest to `pos`, for any point inside the row's height;

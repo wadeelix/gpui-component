@@ -1307,21 +1307,11 @@ impl<M: InputModeKind> InputBaseState<M> {
     }
 
     pub(super) fn select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
-        if self.is_single_line() {
-            return;
-        }
-        self.undo_manager.break_transaction_coalescing();
-        let offset = self.start_of_line().saturating_sub(1);
-        self.select_to(self.previous_boundary(offset), cx);
+        self.select_vertical(-1, cx);
     }
 
     pub(super) fn select_down(&mut self, _: &SelectDown, _: &mut Window, cx: &mut Context<Self>) {
-        if self.is_single_line() {
-            return;
-        }
-        self.undo_manager.break_transaction_coalescing();
-        let offset = (self.end_of_line() + 1).min(self.text.len());
-        self.select_to(self.next_boundary(offset), cx);
+        self.select_vertical(1, cx);
     }
 
     pub(super) fn on_action_select_all(
@@ -5375,6 +5365,71 @@ mod tests {
                     state.table_step(cursor, false).is_none(),
                     "and on the last one"
                 );
+            })
+        });
+    }
+
+    /// Shift+Down extends the selection from its head one row down at the
+    /// head's x, the anchor staying; inside a wrapped cell by text row.
+    #[gpui::test]
+    fn shift_down_extends_by_row_at_the_head_s_x(cx: &mut TestAppContext) {
+        let (mut cx, input) = table_editor(cx, TABLE_DOC);
+        cx.simulate_resize(gpui::size(px(320.), px(600.)));
+        cx.run_until_parked();
+        draw(&mut cx);
+        // Prose first: from the third glyph of `prose one`, Shift+Down
+        // selects to the third glyph of the header row's line.
+        cx.update(|_, cx| input.update(cx, |state, cx| state.set_selected_range(3..3, cx)));
+        cx.simulate_keystrokes("shift-down");
+        cx.run_until_parked();
+        let header = TABLE_DOC.find('|').unwrap();
+        cx.update(|_, cx| {
+            input.read_with(cx, |state, _| {
+                let range = state.selected_range();
+                assert_eq!(range.start, 3, "the anchor stays");
+                assert!(
+                    range.end > header && range.end < header + 6,
+                    "the head is near the same x on the next line: {range:?}"
+                );
+            })
+        });
+
+        // Inside a wrapped cell: by text row, the anchor staying.
+        let target = cx.update(|_, cx| input.read_with(cx, |state, _| cell_point(state, 3, 0, 1)));
+        cx.simulate_click(target, gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.replace_text_in_range(None, &"x".repeat(40), window, cx)
+            })
+        });
+        draw(&mut cx);
+        let cell_range = cx.update(|_, cx| {
+            input.read_with(cx, |state, _| {
+                state.table_cell(cell_start(state, 3, 0), 0).unwrap().1
+            })
+        });
+        let anchor = cell_range.start + 2;
+        cx.update(|_, cx| {
+            input.update(cx, |state, cx| state.set_selected_range(anchor..anchor, cx))
+        });
+        cx.simulate_keystrokes("shift-down");
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            input.read_with(cx, |state, _| {
+                let range = state.selected_range();
+                assert_eq!(range.start, anchor);
+                assert!(
+                    cell_range.contains(&range.end) && range.end > anchor,
+                    "the head moved one text row down inside the cell: {range:?} in {cell_range:?}"
+                );
+            })
+        });
+        cx.simulate_keystrokes("shift-up");
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            input.read_with(cx, |state, _| {
+                assert_eq!(state.selected_range(), anchor..anchor, "and back");
             })
         });
     }
