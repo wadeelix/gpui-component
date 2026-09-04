@@ -76,6 +76,36 @@ impl<M: InputModeKind> InputBaseState<M> {
         let offset = self.cursor();
         let was_preferred_column = self.preferred_column;
 
+        // A table row is one wrap row of several text rows: inside a cell the
+        // caret moves by text row, and leaves the table row only from the
+        // cell's first or last one (Word).
+        if move_lines.abs() == 1 {
+            let point = self.text.offset_to_point(offset);
+            let line_start = self.text.line_start_offset(point.row);
+            let inside = last_layout.line(point.row).and_then(|line| {
+                line.table.as_ref()?.step_text_row(
+                    offset.checked_sub(line_start)?,
+                    move_lines < 0,
+                    was_preferred_column.map(|(x, _)| x),
+                    self.cursor_line_end_affinity,
+                )
+            });
+            if let Some(local) = inside {
+                let direction = if move_lines < 0 {
+                    MoveDirection::Up
+                } else {
+                    MoveDirection::Down
+                };
+                self.pause_blink_cursor(cx);
+                self.move_to(line_start + local, Some(direction), cx);
+                if was_preferred_column.is_some() {
+                    self.preferred_column = was_preferred_column;
+                }
+                cx.notify();
+                return;
+            }
+        }
+
         let mut display_point = self.display_map.offset_to_wrap_display_point(offset);
 
         // Convert wrap row → display row (skips folded rows), move, then convert back
@@ -110,13 +140,17 @@ impl<M: InputModeKind> InputBaseState<M> {
 
             // If in visible range, prefer to use position to get column.
             if let Some(line) = last_layout.line(next_point.row) {
-                if let Some(x) = line.closest_index_for_position(
-                    Point {
-                        x: preferred_x,
-                        y: next_display_point.local_row * last_layout.line_height,
-                    },
-                    last_layout,
-                ) {
+                // Up into a table row lands on its last text row, as it would
+                // on the last wrap row of prose.
+                let y = match line.table.as_ref() {
+                    Some(table) if move_lines < 0 => {
+                        table.size().height - table.text_row_height / 2.
+                    }
+                    _ => next_display_point.local_row * last_layout.line_height,
+                };
+                if let Some(x) =
+                    line.closest_index_for_position(Point { x: preferred_x, y }, last_layout)
+                {
                     new_offset = line_start_offset + x;
                 }
             } else {

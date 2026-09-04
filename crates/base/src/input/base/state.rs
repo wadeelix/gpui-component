@@ -803,6 +803,25 @@ impl<M: InputModeKind> InputBaseState<M> {
         ))
     }
 
+    /// Where Up or Down would put the caret inside its table cell, if the
+    /// cell has a text row there; none at the cell's first or last row, where
+    /// the move leaves the table row. For an application that steps between
+    /// rows itself and must not do so while the caret can still move inside
+    /// the cell.
+    pub fn table_step(&self, offset: usize, up: bool) -> Option<usize> {
+        let layout = self.last_layout.as_ref()?;
+        let row = self.text.offset_to_point(offset.min(self.text.len())).row;
+        let table = layout.line(row)?.table.as_ref()?;
+        let line_start = self.text.line_start_offset(row);
+        let local = table.step_text_row(
+            offset.checked_sub(line_start)?,
+            up,
+            self.preferred_column.map(|(x, _)| x),
+            self.cursor_line_end_affinity,
+        )?;
+        Some(line_start + local)
+    }
+
     /// Re-lays out the lines covering `range` from the current text.
     ///
     /// For a change that is not an edit but changes how a line is laid out:
@@ -5262,6 +5281,97 @@ mod tests {
             .expect("the row is visible");
         let table = layout.lines[vi].table.as_ref().expect("a table row");
         layout.visible_line_byte_offsets[vi] + table.cells[cell].content.start
+    }
+
+    /// Up and Down move by text row inside a wrapped cell, and leave the
+    /// table row only from the cell's first or last one; Up from below lands
+    /// on the cell's last row.
+    #[gpui::test]
+    fn up_and_down_walk_the_text_rows_of_a_cell_before_leaving_it(cx: &mut TestAppContext) {
+        let (mut cx, input) = table_editor(cx, TABLE_DOC);
+        cx.simulate_resize(gpui::size(px(320.), px(600.)));
+        cx.run_until_parked();
+        draw(&mut cx);
+        // Row 3 is `| e | f |`; forty characters in its first cell wrap it.
+        let target = cx.update(|_, cx| input.read_with(cx, |state, _| cell_point(state, 3, 0, 1)));
+        cx.simulate_click(target, gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.replace_text_in_range(None, &"x".repeat(40), window, cx)
+            })
+        });
+        draw(&mut cx);
+        let (cell_range, rows) = cx.update(|_, cx| {
+            input.read_with(cx, |state, _| {
+                let (_, range) = state.table_cell(cell_start(state, 3, 0), 0).unwrap();
+                let layout = state.last_layout.as_ref().unwrap();
+                let vi = layout
+                    .visible_buffer_lines
+                    .iter()
+                    .position(|&b| b == 3)
+                    .unwrap();
+                (range, layout.lines[vi].table.as_ref().unwrap().rows)
+            })
+        });
+        assert!(rows >= 3, "the cell wraps to {rows} rows");
+
+        // From the cell's start, Down walks one text row at a time.
+        cx.update(|_, cx| {
+            input.update(cx, |state, cx| {
+                state.set_selected_range(cell_range.start..cell_range.start, cx)
+            })
+        });
+        let mut inside = 0;
+        for _ in 0..rows {
+            let stays = cx.update(|_, cx| {
+                input.read_with(cx, |state, _| {
+                    state.table_step(state.cursor(), false).is_some()
+                })
+            });
+            cx.simulate_keystrokes("down");
+            cx.run_until_parked();
+            let cursor = cx.update(|_, cx| input.read_with(cx, |state, _| state.cursor()));
+            if cell_range.contains(&cursor) {
+                inside += 1;
+                assert!(stays, "table_step agreed the caret stays in the cell");
+            } else {
+                assert!(!stays, "table_step agreed the caret leaves");
+                assert!(
+                    cursor > cell_range.end,
+                    "down left the table row at {cursor}"
+                );
+                break;
+            }
+        }
+        assert_eq!(inside, rows - 1, "one Down per text row before leaving");
+
+        // Up from the prose below lands on the cell's last text row.
+        let prose_two = TABLE_DOC.len() + 40
+            - "prose two
+"
+            .len()
+            + 3;
+        cx.update(|_, cx| {
+            input.update(cx, |state, cx| {
+                state.set_selected_range(prose_two..prose_two, cx)
+            })
+        });
+        cx.simulate_keystrokes("up");
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            input.read_with(cx, |state, _| {
+                let cursor = state.cursor();
+                assert!(
+                    state.table_step(cursor, true).is_some(),
+                    "on a text row below the first: {cursor}"
+                );
+                assert!(
+                    state.table_step(cursor, false).is_none(),
+                    "and on the last one"
+                );
+            })
+        });
     }
 
     /// The cell the last frame outlined on buffer line `row`.

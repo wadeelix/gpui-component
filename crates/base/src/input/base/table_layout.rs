@@ -205,6 +205,30 @@ impl TableRowLayout {
         Some(self.closest_in_row(cell_ix, cell, k, pos.x))
     }
 
+    /// The offset one text row up or down from `offset` inside its cell, at
+    /// `x` (the caret's own x when none is preferred). None at the cell's
+    /// first or last row: from there a vertical move leaves the table row.
+    pub(crate) fn step_text_row(
+        &self,
+        offset: usize,
+        up: bool,
+        preferred_x: Option<Pixels>,
+        line_end_affinity: bool,
+    ) -> Option<usize> {
+        let (cell_ix, clamped) = self.cell_of(offset);
+        let cell = self.cells.get(cell_ix)?;
+        let (k, _) = self.row_of(cell, clamped, line_end_affinity);
+        let target = if up { k.checked_sub(1)? } else { k + 1 };
+        if target >= cell.rows.len() {
+            return None;
+        }
+        let x = match preferred_x {
+            Some(x) => x,
+            None => self.position_for_index(offset, line_end_affinity)?.x,
+        };
+        Some(self.closest_in_row(cell_ix, cell, target, x))
+    }
+
     /// The offset nearest to `x` on the first text row, for single-line hit
     /// testing.
     pub(crate) fn closest_index_for_x(&self, x: Pixels) -> usize {
@@ -383,7 +407,9 @@ impl TableRowLayout {
         }
 
         // Chrome: column separators, the outer rules, and a heavier rule under
-        // the delimiter row, which is where a reader expects the header line.
+        // the header, where a reader expects the header line. The delimiter
+        // row draws a hairline like any other: collapsed it is a sliver
+        // under that rule, open it is a row of dashes.
         let border = self.chrome.border;
         let hairline = px(1.);
         for column in &self.columns {
@@ -408,7 +434,7 @@ impl TableRowLayout {
                 border,
             ));
         }
-        let rule = if self.kind == TableRowKind::Delimiter {
+        let rule = if self.kind == TableRowKind::Header {
             px(2.)
         } else {
             hairline
