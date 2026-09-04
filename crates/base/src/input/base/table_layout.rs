@@ -161,6 +161,13 @@ impl TableRowLayout {
         offset: usize,
         line_end_affinity: bool,
     ) -> Option<Point<Pixels>> {
+        // An offset past the line is not on it. The walkers that resolve an
+        // offset to a line take the first line that answers, so answering
+        // for every offset would put everything below a table on its first
+        // visible row.
+        if offset > self.len {
+            return None;
+        }
         let (cell_ix, offset) = self.cell_of(offset);
         let cell = self.cells.get(cell_ix)?;
         let column = self.columns.get(cell_ix)?;
@@ -503,6 +510,15 @@ mod tests {
             layout.position_for_index(0, false),
             Some(point(CELL_PAD, px(0.))),
             "a padding byte draws at its cell's edge"
+        );
+        assert_eq!(
+            layout.position_for_index(12, false).map(|p| p.x),
+            Some(px(50.) + CELL_PAD)
+        );
+        assert_eq!(
+            layout.position_for_index(13, false),
+            None,
+            "an offset past the line is not on it"
         );
     }
 

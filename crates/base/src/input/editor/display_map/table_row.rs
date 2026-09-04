@@ -81,6 +81,15 @@ impl TableRowItem {
             if prev < text.len() || ranges.is_empty() {
                 ranges.push(content.start + prev..content.end);
             }
+            // Past the ceiling the last kept row takes the rest of the cell:
+            // nothing is shaped or drawn for it, and an offset in it resolves
+            // to that row's end rather than to a row below the table.
+            if ranges.len() > MAX_ROWS_PER_CELL {
+                ranges.truncate(MAX_ROWS_PER_CELL);
+                if let Some(last) = ranges.last_mut() {
+                    last.end = content.end;
+                }
+            }
             rows = rows.max(ranges.len());
             cell_lines.push(ranges);
         }
@@ -90,7 +99,7 @@ impl TableRowItem {
             aligns: row.aligns.clone(),
             cells: row.cells.clone(),
             cell_lines,
-            rows: rows.min(MAX_ROWS_PER_CELL),
+            rows,
         }
     }
 
@@ -119,30 +128,18 @@ fn clamp_to_line(line: &str, range: &Range<usize>) -> Range<usize> {
     start..end
 }
 
+/// Test doubles shared by the engine's table tests: a cell splitter and a
+/// wrapper that reason in characters rather than glyphs.
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_support {
     use super::*;
 
-    /// Wraps at every `width / 10` bytes, so a test can reason in characters.
-    fn wrap_every(text: &str, width: Pixels) -> Vec<gpui::Boundary> {
-        let per_row = (f32::from(width) / 10.).floor().max(1.) as usize;
-        let mut out = Vec::new();
-        let mut ix = per_row;
-        while ix < text.len() {
-            out.push(gpui::Boundary { ix, next_indent: 0 });
-            ix += per_row;
-        }
-        out
-    }
-
-    fn row(line: &str, columns: usize) -> TableRow {
-        // Cells are the text between pipes, trimmed; enough for these tests.
+    /// Cells of one table line: the text between pipes, trimmed, an empty
+    /// cell mid-padding, padded or cut to `columns` when given.
+    pub(crate) fn cells_of(line: &str, columns: Option<usize>) -> Vec<TableCellSpan> {
         let mut cells = Vec::new();
-        let mut start = 1;
-        for (ix, ch) in line.char_indices() {
-            if ix == 0 {
-                continue;
-            }
+        let mut start = usize::from(line.starts_with('|'));
+        for (ix, ch) in line.char_indices().skip(start) {
             if ch == '|' {
                 let span = &line[start..ix];
                 let lead = span.len() - span.trim_start().len();
@@ -155,20 +152,50 @@ mod tests {
                 start = ix + 1;
             }
         }
-        while cells.len() < columns {
+        if start < line.len() && !line[start..].trim().is_empty() {
             cells.push(TableCellSpan {
-                content: line.len()..line.len(),
+                content: start..line.len(),
                 separator: line.len(),
             });
         }
-        cells.truncate(columns);
+        if let Some(columns) = columns {
+            while cells.len() < columns {
+                cells.push(TableCellSpan {
+                    content: line.len()..line.len(),
+                    separator: line.len(),
+                });
+            }
+            cells.truncate(columns);
+        }
+        cells
+    }
+
+    /// Wraps at every `width / 10` bytes, so a test can reason in characters.
+    pub(crate) fn wrap_every(text: &str, width: Pixels) -> Vec<gpui::Boundary> {
+        let per_row = (f32::from(width) / 10.).floor().max(1.) as usize;
+        let mut out = Vec::new();
+        let mut ix = per_row;
+        while ix < text.len() {
+            out.push(gpui::Boundary { ix, next_indent: 0 });
+            ix += per_row;
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::{cells_of, wrap_every};
+    use super::*;
+
+    fn row(line: &str, columns: usize) -> TableRow {
         TableRow {
             first_row: 0,
             last_row: 0,
             kind: TableRowKind::Body,
             columns,
             aligns: vec![ColumnAlign::Left; columns],
-            cells,
+            cells: cells_of(line, Some(columns)),
         }
     }
 
@@ -222,6 +249,21 @@ mod tests {
         assert!(item.same_shape(&r));
         r.columns = 3;
         assert!(!item.same_shape(&r));
+    }
+
+    #[test]
+    fn a_cell_past_the_ceiling_keeps_its_bytes_in_its_last_row() {
+        // 40 characters at one per row: 40 rows wanted, 32 kept.
+        let text = "x".repeat(40);
+        let line = format!("| {text} |");
+        let item = TableRowItem::build(&row(&line, 1), &line, px(22.), &mut wrap_every);
+        assert_eq!(item.rows, MAX_ROWS_PER_CELL);
+        assert_eq!(item.cell_lines[0].len(), MAX_ROWS_PER_CELL);
+        assert_eq!(
+            item.cell_lines[0].last().unwrap().end,
+            2 + 40,
+            "the last row runs to the cell's end"
+        );
     }
 
     #[test]

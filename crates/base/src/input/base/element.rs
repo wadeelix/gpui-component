@@ -753,7 +753,9 @@ impl<M: InputModeKind> TextElement<M> {
             // cells past it.
             if let Some(table) = &line.table {
                 let line_end = prev_lines_offset + line.len();
-                if start_ix <= line_end && end_ix >= prev_lines_offset {
+                // A range ending exactly where the row starts covers none of
+                // it, so it draws nothing here rather than the first column.
+                if start_ix <= line_end && end_ix > prev_lines_offset {
                     let starts_before = start_ix < prev_lines_offset;
                     let ends_after = end_ix > line_end;
                     let local = start_ix.saturating_sub(prev_lines_offset).min(line.len())
@@ -817,8 +819,8 @@ impl<M: InputModeKind> TextElement<M> {
                     end_x = line_wrap_width;
                 }
 
-                // A line that shaped into no glyphs -- one standing in for a
-                // block widget, or concealed away entirely -- reports the same
+                // A line that shaped into no glyphs -- one concealed away
+                // entirely -- reports the same
                 // position for both of its ends, which would draw a sliver.
                 // Its bytes are still inside the range and a copy still takes
                 // them, so fill the row: the selection is the only feedback

@@ -18,6 +18,7 @@
 ; A table cell holds inline Markdown too, but the block grammar gives it no
 ; `inline` child, so without this the emphasis in a cell is never captured:
 ; its markers could not melt, and a cell laid out by the engine showed them raw.
+; Not combined: each cell is its own inline document, or a `*` opened in
+; one cell would close in another and both would go italic.
 ((pipe_table_cell) @injection.content
-  (#set! injection.language "markdown_inline")
-  (#set! injection.combined))
+  (#set! injection.language "markdown_inline"))

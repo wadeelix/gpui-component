@@ -102,9 +102,9 @@ pub trait InputHighlighter {
     /// Extra height for the buffer line covering `line_range`, as a multiple of
     /// the base line height, on top of what `line_font_scale` already implies.
     ///
-    /// This is what a block widget uses to make room for itself: a fenced code
-    /// block's first line can ask for the height of the whole block without its
-    /// *text* growing, which is the part `line_font_scale` cannot express.
+    /// Room without the text growing: a line can ask for more height than
+    /// its glyphs take, which is the part `line_font_scale` cannot express.
+    /// (Table rows do not use it: their height comes from their cells.)
     ///
     /// Default: `1.0` (the line takes the room its text needs).
     fn line_height_scale(&self, line_range: &Range<usize>) -> f32 {

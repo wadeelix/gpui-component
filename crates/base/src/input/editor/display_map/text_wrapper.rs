@@ -678,29 +678,69 @@ impl TextWrapper {
         let delta = new_end_row as isize - end_row as isize;
         let is_old_table = |row: usize| self.line(row).is_some_and(|item| item.table.is_some());
 
-        // 1. The tables the edited rows were part of, in the old text.
-        if !self.lines.is_empty() {
-            if is_old_table(start_row) {
-                let mut first = start_row;
-                while first > 0 && is_old_table(first - 1) {
-                    first -= 1;
-                }
-                plan.lo = plan.lo.min(first);
+        // The table the edited rows were part of, in the old text: a table is
+        // a contiguous run of table rows, walked from the edit's ends.
+        let mut old_extent: Option<(usize, usize)> = None;
+        if !self.lines.is_empty() && (is_old_table(start_row) || is_old_table(end_row)) {
+            let mut first = start_row;
+            while first > 0 && is_old_table(first - 1) {
+                first -= 1;
             }
-            if is_old_table(end_row) {
-                let mut last = end_row;
-                while last + 1 < old_count && is_old_table(last + 1) {
-                    last += 1;
-                }
-                // Rows after the edit shift by the edit's line delta.
-                let last_new = (last as isize + delta).max(new_end_row as isize) as usize;
-                plan.hi = plan.hi.max(last_new);
+            let mut last = end_row;
+            while last + 1 < old_count && is_old_table(last + 1) {
+                last += 1;
             }
+            old_extent = Some((first, last));
         }
 
-        // 2. The tables the new text puts those rows in, until it stops growing.
+        // The edited rows in the new text, asked first: whether the table's
+        // shape changed is decided from them alone.
+        let hi_edit = new_end_row.min(new_count.saturating_sub(1));
+        for row in new_start_row..=hi_edit {
+            let line_start = changed_text.line_start_offset(row);
+            let line_range = line_start..line_start + changed_text.line_len(row);
+            let answer = self.ask_table_row(&line_range, changed_text);
+            plan.answers.insert(row, answer);
+        }
+
+        // A keystroke inside a cell changes one row: same table, same
+        // columns, same extent. Anything else -- a row joining or leaving a
+        // table, a column added to the header, the delimiter row going --
+        // changes every row of the table, old and new, so the rebuild widens
+        // to the union of the two extents.
+        let shape_changed = (new_start_row..=hi_edit).any(|row| {
+            let answer = plan.answers.get(&row).and_then(|a| a.as_ref());
+            let old_row = if row <= start_row {
+                Some(row)
+            } else {
+                (row as isize - delta).try_into().ok()
+            };
+            let old_item = old_row
+                .filter(|_| !self.lines.is_empty())
+                .and_then(|r| self.line(r))
+                .and_then(|item| item.table.as_ref());
+            match (old_item, answer, old_extent) {
+                (None, None, _) => false,
+                (Some(item), Some(table), Some((first, last))) => {
+                    let last_new = (last as isize + delta).max(new_end_row as isize) as usize;
+                    !item.same_shape(table)
+                        || (table.first_row, table.last_row) != (first, last_new)
+                }
+                _ => true,
+            }
+        });
+        if !shape_changed {
+            return plan;
+        }
+
         let mut lo = plan.lo;
         let mut hi = plan.hi.min(new_count.saturating_sub(1));
+        if let Some((first, last)) = old_extent {
+            lo = lo.min(first);
+            hi = hi.max((last as isize + delta).max(new_end_row as isize) as usize);
+        }
+        hi = hi.min(new_count.saturating_sub(1));
+        // 2. The tables the new text puts those rows in, until it stops growing.
         loop {
             let (before_lo, before_hi) = (lo, hi);
             for row in lo..=hi {
@@ -710,11 +750,13 @@ impl TextWrapper {
                 let line_start = changed_text.line_start_offset(row);
                 let line_range = line_start..line_start + changed_text.line_len(row);
                 let answer = self.ask_table_row(&line_range, changed_text);
-                if let Some(table_row) = &answer {
+                plan.answers.insert(row, answer);
+            }
+            for row in lo..=hi {
+                if let Some(Some(table_row)) = plan.answers.get(&row) {
                     lo = lo.min(table_row.first_row);
                     hi = hi.max(table_row.last_row.min(new_count.saturating_sub(1)));
                 }
-                plan.answers.insert(row, answer);
             }
             if (lo, hi) == (before_lo, before_hi) {
                 break;
@@ -991,7 +1033,7 @@ impl LineLayout {
     }
 
     /// Bytes this line actually shaped into glyphs. Zero when the line stands
-    /// in for a block widget, or was concealed away entirely.
+    /// in for a table row, or was concealed away entirely.
     #[inline]
     pub(crate) fn display_len(&self) -> usize {
         self.display_len
@@ -2334,7 +2376,7 @@ mod tests {
 
     /// A scale the application computes from a stale or broken state must not
     /// poison the sums — every seek afterwards would be wrong.
-    /// A block widget asks for room without its text growing. The height map
+    /// A line can ask for room without its text growing. The height map
     /// only sees the combined number, so what this pins is that a scale of 3
     /// makes the row three times as tall whatever produced it — the caller
     /// multiplies font scale by height scale before handing it over.
@@ -2387,41 +2429,7 @@ mod tests {
 
     // ---- Table rows ---------------------------------------------------------
 
-    /// Cells of one table line for the tests: the text between pipes, trimmed,
-    /// an empty cell mid-padding, padded to `columns`.
-    fn test_cells(line: &str, columns: Option<usize>) -> Vec<crate::input::TableCellSpan> {
-        let mut cells = Vec::new();
-        let mut start = usize::from(line.starts_with('|'));
-        for (ix, ch) in line.char_indices().skip(start) {
-            if ch == '|' {
-                let span = &line[start..ix];
-                let lead = span.len() - span.trim_start().len();
-                let trail = span.trim_end().len();
-                let lead = if trail == 0 { span.len() / 2 } else { lead };
-                cells.push(crate::input::TableCellSpan {
-                    content: start + lead..start + trail.max(lead),
-                    separator: ix,
-                });
-                start = ix + 1;
-            }
-        }
-        if start < line.len() && !line[start..].trim().is_empty() {
-            cells.push(crate::input::TableCellSpan {
-                content: start..line.len(),
-                separator: line.len(),
-            });
-        }
-        if let Some(columns) = columns {
-            while cells.len() < columns {
-                cells.push(crate::input::TableCellSpan {
-                    content: line.len()..line.len(),
-                    separator: line.len(),
-                });
-            }
-            cells.truncate(columns);
-        }
-        cells
-    }
+    use crate::input::display_map::table_test_support::{cells_of as test_cells, wrap_every};
 
     /// A table-row source for the tests: a run of lines with a pipe whose
     /// second line is dashes is a table. `enabled` lets a test switch tables
@@ -2472,19 +2480,6 @@ mod tests {
                 cells: test_cells(&line_of(row)?, Some(columns)),
             })
         })
-    }
-
-    /// Wraps at every `width / 10` bytes, so a test can reason in characters:
-    /// two columns across 100px leave 38px per cell, three characters a row.
-    fn wrap_every(text: &str, width: Pixels) -> Vec<gpui::Boundary> {
-        let per_row = (f32::from(width) / 10.).floor().max(1.) as usize;
-        let mut out = Vec::new();
-        let mut ix = per_row;
-        while ix < text.len() {
-            out.push(gpui::Boundary { ix, next_indent: 0 });
-            ix += per_row;
-        }
-        out
     }
 
     fn table_wrapper(text: &Rope, enabled: &Rc<std::cell::Cell<bool>>) -> TextWrapper {

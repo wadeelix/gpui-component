@@ -747,7 +747,7 @@ impl<M: InputModeKind> InputBaseState<M> {
         };
         // A line's height is its font scale times whatever extra room it asks
         // for. The two are separate because a heading grows its *text*, while
-        // a block widget needs room without the text under it growing at all.
+        // extra room leaves the text under it its own size.
         let scale: LineHeightScale = {
             let highlighter = highlighter.clone();
             Rc::new(move |range: &Range<usize>| {
@@ -5073,35 +5073,7 @@ mod tests {
 
     // ---- Table rows laid out per cell -----------------------------------
 
-    /// Cells of one table line: the text between pipes, trimmed, an empty
-    /// cell mid-padding, padded to `columns`.
-    fn table_cells(line: &str, columns: Option<usize>) -> Vec<crate::input::TableCellSpan> {
-        let mut cells = Vec::new();
-        let mut start = usize::from(line.starts_with('|'));
-        for (ix, ch) in line.char_indices().skip(start) {
-            if ch == '|' {
-                let span = &line[start..ix];
-                let lead = span.len() - span.trim_start().len();
-                let trail = span.trim_end().len();
-                let lead = if trail == 0 { span.len() / 2 } else { lead };
-                cells.push(crate::input::TableCellSpan {
-                    content: start + lead..start + trail.max(lead),
-                    separator: ix,
-                });
-                start = ix + 1;
-            }
-        }
-        if let Some(columns) = columns {
-            while cells.len() < columns {
-                cells.push(crate::input::TableCellSpan {
-                    content: line.len()..line.len(),
-                    separator: line.len(),
-                });
-            }
-            cells.truncate(columns);
-        }
-        cells
-    }
+    use crate::input::display_map::table_test_support::cells_of as table_cells;
 
     /// A highlighter whose only job is to say which lines are table rows: a
     /// run of lines with a pipe whose second line is dashes.
@@ -5285,6 +5257,45 @@ mod tests {
             .expect("the row is visible");
         let table = layout.lines[vi].table.as_ref().expect("a table row");
         layout.visible_line_byte_offsets[vi] + table.cells[cell].content.start
+    }
+
+    /// Every offset of a table row has a position, and the point it is drawn
+    /// at resolves back to it -- or, for a byte in padding or on a pipe, to
+    /// the cell edge it was drawn at.
+    #[gpui::test]
+    fn every_offset_of_a_table_row_round_trips_through_its_position(cx: &mut TestAppContext) {
+        let (mut cx, input) = table_editor(cx, TABLE_DOC);
+        draw(&mut cx);
+        cx.update(|_, cx| {
+            input.read_with(cx, |state, _| {
+                let layout = state.last_layout.as_ref().unwrap();
+                let vi = layout
+                    .visible_buffer_lines
+                    .iter()
+                    .position(|&b| b == 1)
+                    .unwrap();
+                let line = &layout.lines[vi];
+                let table = line.table.as_ref().unwrap();
+                for local in 0..=table.len {
+                    let pos = line
+                        .position_for_index(local, layout, false)
+                        .unwrap_or_else(|| panic!("offset {local} has a position"));
+                    // Just left of the boundary: gpui resolves a point past the
+                    // last glyph's start to the line's end.
+                    let probe = pos + point(px(-0.1), table.text_row_height / 2.);
+                    let back = line
+                        .closest_index_for_position(probe, layout)
+                        .unwrap_or_else(|| panic!("offset {local}: the point is on the row"));
+                    let (_, clamped) = table.cell_of(local);
+                    assert_eq!(back, clamped, "offset {local} drawn at {pos:?}");
+                }
+                assert_eq!(
+                    line.position_for_index(table.len + 1, layout, false),
+                    None,
+                    "past the line is not on it"
+                );
+            });
+        });
     }
 
     /// A click lands the caret in the clicked cell at the clicked glyph, and

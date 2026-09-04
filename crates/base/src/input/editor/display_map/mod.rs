@@ -16,6 +16,8 @@ mod wrap_map;
 
 // Re-export public API
 pub use self::display_map::{DisplayMap, LineHeightScale, TableRowSource, WrappingIndent};
+#[cfg(test)]
+pub(crate) use self::table_row::test_support as table_test_support;
 pub(crate) use self::table_row::{CELL_PAD, TableRowItem};
 pub(crate) use self::text_wrapper::{
     LineLayout, display_to_raw, normalize_concealed, raw_to_display,
