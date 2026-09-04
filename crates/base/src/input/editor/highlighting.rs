@@ -104,11 +104,15 @@ pub trait InputHighlighter {
     ///
     /// Room without the text growing: a line can ask for more height than
     /// its glyphs take, which is the part `line_font_scale` cannot express.
-    /// (Table rows do not use it: their height comes from their cells.)
+    /// A table row's height is its cells' wrap rows times this, so a value
+    /// under `1.0` collapses a row of nothing (a delimiter row) to a rule.
+    ///
+    /// Asked at wrap time with `text` as it will be after the edit, like
+    /// `table_row`: the highlighter's own text is one edit behind here.
     ///
     /// Default: `1.0` (the line takes the room its text needs).
-    fn line_height_scale(&self, line_range: &Range<usize>) -> f32 {
-        let _ = line_range;
+    fn line_height_scale(&self, line_range: &Range<usize>, text: &Rope) -> f32 {
+        let _ = (line_range, text);
         1.0
     }
 

@@ -156,7 +156,7 @@ impl<'a> sum_tree::Dimension<'a, LineSummary> for WrapRows {
 
 /// Height multiplier for the line covering a byte range, supplied by the
 /// application (see `InputHighlighter::line_font_scale`).
-pub type LineHeightScale = Rc<dyn Fn(&Range<usize>) -> f32>;
+pub type LineHeightScale = Rc<dyn Fn(&Range<usize>, &Rope) -> f32>;
 
 /// The table row a buffer line is, supplied by the application (see
 /// `InputHighlighter::table_row`): the line's byte range, the text as it will
@@ -529,7 +529,7 @@ impl TextWrapper {
             let line_start = changed_text.line_start_offset(row);
             let line_range = line_start..line_start + line.len();
             let height_scale = match &self.height_scale {
-                Some(scale) => normalize_scale(scale(&line_range)),
+                Some(scale) => normalize_scale(scale(&line_range, changed_text)),
                 None => 1.0,
             };
 
@@ -2257,7 +2257,7 @@ mod tests {
         let mut wrapper = TextWrapper::new(font, px(14.), None);
         let text = source.borrow().clone();
         let source = Rc::clone(source);
-        wrapper.height_scale = Some(Rc::new(move |range: &Range<usize>| {
+        wrapper.height_scale = Some(Rc::new(move |range: &Range<usize>, _: &Rope| {
             let text = source.borrow();
             if range.end > text.len() {
                 return 1.0;
@@ -2395,7 +2395,7 @@ mod tests {
         };
         let mut wrapper = TextWrapper::new(font, px(14.), None);
         let inner = Rc::clone(&source);
-        wrapper.height_scale = Some(Rc::new(move |range: &Range<usize>| {
+        wrapper.height_scale = Some(Rc::new(move |range: &Range<usize>, _: &Rope| {
             let text = inner.borrow();
             if range.end > text.len() {
                 return 1.0;

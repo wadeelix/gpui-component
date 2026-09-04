@@ -491,7 +491,7 @@ mod tests {
         map.set_text(text, cx);
         let source = text.clone();
         map.set_height_scale(
-            Some(Rc::new(move |range: &Range<usize>| {
+            Some(Rc::new(move |range: &Range<usize>, _: &Rope| {
                 if range.end > source.len() {
                     return 1.0;
                 }
