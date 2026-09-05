@@ -113,9 +113,31 @@ actions!(
 #[derive(Clone)]
 pub enum InputEvent {
     Change,
-    PressEnter { secondary: bool, shift: bool },
+    PressEnter {
+        secondary: bool,
+        shift: bool,
+    },
     Focus,
     Blur,
+    /// A click on an insertion marker of a table: the "+" the pointer found
+    /// on a column boundary of the header's top rule, or on a row's bottom
+    /// edge at the table's left. `line_start` is that row's first byte;
+    /// `column` is the column to insert before (the column count: after the
+    /// last), or none to insert a row below that row.
+    TableInsert {
+        line_start: usize,
+        column: Option<usize>,
+    },
+}
+
+/// The insertion marker under the pointer, if it is near one: drawn as a
+/// "+" the writer can click, over a column boundary or under a row.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TableMarker {
+    pub(crate) line_start: usize,
+    pub(crate) column: Option<usize>,
+    /// Where it is drawn, in window coordinates.
+    pub(crate) bounds: Bounds<Pixels>,
 }
 
 pub(super) const CONTEXT: &str = "Input";
@@ -344,6 +366,8 @@ pub struct InputBaseState<M: InputModeKind> {
     /// container and would otherwise take every click before the widget could,
     /// leaving a checkbox that draws correctly but never toggles.
     pub(super) widget_hitboxes: RefCell<Vec<Bounds<Pixels>>>,
+    /// The table insertion marker the pointer is near, if any.
+    pub(crate) table_marker: Option<TableMarker>,
     pub(super) editor_paddings: Edges<Pixels>,
     pub(super) editor_style: InputEditorStyle,
 
@@ -631,6 +655,7 @@ impl<M: InputModeKind> InputBaseState<M> {
             scroll_size: gpui::size(px(0.), px(0.)),
             editor_scrollbar_snapshot: Cell::new(None),
             widget_hitboxes: RefCell::new(Vec::new()),
+            table_marker: None,
             editor_paddings: Edges::default(),
             deferred_scroll_offset: None,
             preferred_column: None,
@@ -1871,7 +1896,16 @@ impl<M: InputModeKind> InputBaseState<M> {
         if !within_bounds {
             // Clear hover when mouse leaves the input
             M::clear_hover_state(self, cx);
+            if self.table_marker.take().is_some() {
+                cx.notify();
+            }
             return;
+        }
+
+        let marker = self.marker_at(event.position);
+        if marker != self.table_marker {
+            self.table_marker = marker;
+            cx.notify();
         }
 
         // Show diagnostic popover on mouse move
@@ -1890,6 +1924,54 @@ impl<M: InputModeKind> InputBaseState<M> {
                 self.diagnostic_popover = None;
             }
         }
+    }
+
+    /// The insertion marker near `position`: on the table's first row a
+    /// column boundary of its top rule (one per boundary, the right edge
+    /// included), on any row but the delimiter its bottom-left corner. The
+    /// reach is wider than the drawn marker, so it appears before the pointer
+    /// is on it and does not vanish while the pointer crosses it.
+    fn marker_at(&self, position: Point<Pixels>) -> Option<TableMarker> {
+        const RADIUS: Pixels = px(8.);
+        const REACH: Pixels = px(12.);
+        let bounds = self.last_bounds?;
+        let layout = self.last_layout.as_ref()?;
+        let left = bounds.origin.x + layout.line_number_width;
+        let mut y = bounds.origin.y + layout.visible_top;
+        for (vi, line) in layout.lines.iter().enumerate() {
+            let height = line.size(layout.line_height).height;
+            if let Some(table) = line.table.as_ref()
+                && !table.collapsed()
+            {
+                let line_start = layout.visible_line_byte_offsets[vi];
+                let mut candidates: Vec<(Point<Pixels>, Option<usize>)> = Vec::new();
+                if table.first {
+                    for (ix, column) in table.columns.iter().enumerate() {
+                        candidates.push((point(left + column.x, y), Some(ix)));
+                    }
+                    candidates.push((point(left + table.width, y), Some(table.columns.len())));
+                }
+                if table.kind != crate::input::TableRowKind::Delimiter {
+                    candidates.push((point(left, y + height), None));
+                }
+                for (center, column) in candidates {
+                    if (position.x - center.x).abs() <= REACH
+                        && (position.y - center.y).abs() <= REACH
+                    {
+                        return Some(TableMarker {
+                            line_start,
+                            column,
+                            bounds: Bounds::new(
+                                center - point(RADIUS, RADIUS),
+                                gpui::size(RADIUS * 2., RADIUS * 2.),
+                            ),
+                        });
+                    }
+                }
+            }
+            y += height;
+        }
+        None
     }
 
     pub(super) fn on_scroll_wheel(
@@ -5517,6 +5599,88 @@ mod tests {
             prose..prose + 5,
             "prose is as before"
         );
+    }
+
+    /// The pointer near a column boundary of a table's top rule, or near a
+    /// row's bottom-left corner, finds an insertion marker; a click on it
+    /// asks the application to insert there, and moves no caret.
+    #[gpui::test]
+    fn an_insertion_marker_appears_near_a_boundary_and_its_click_is_an_event(
+        cx: &mut TestAppContext,
+    ) {
+        let (mut cx, input) = table_editor(cx, TABLE_DOC);
+        let events: Rc<RefCell<Vec<(usize, Option<usize>)>>> = Rc::new(RefCell::new(Vec::new()));
+        let sink = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&input, move |_, event: &crate::input::InputEvent, _| {
+                if let crate::input::InputEvent::TableInsert { line_start, column } = event {
+                    sink.borrow_mut().push((*line_start, *column));
+                }
+            })
+            .detach();
+        });
+        let header = TABLE_DOC.find('|').unwrap();
+        let (cell0, _) =
+            cx.update(|_, cx| input.read_with(cx, |state, _| state.table_cell(header, 0).unwrap()));
+        let (cell1, _) =
+            cx.update(|_, cx| input.read_with(cx, |state, _| state.table_cell(header, 1).unwrap()));
+        let marker = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| input.read_with(cx, |state, _| state.table_marker.clone()))
+        };
+
+        // The boundary between the two columns, on the top rule.
+        let between = point(cell1.origin.x, cell0.origin.y);
+        cx.simulate_mouse_move(
+            between + point(px(3.), px(2.)),
+            None,
+            gpui::Modifiers::default(),
+        );
+        cx.run_until_parked();
+        let found = marker(&mut cx).expect("a marker near the boundary");
+        assert_eq!((found.line_start, found.column), (header, Some(1)));
+        assert!(found.bounds.contains(&between));
+
+        // The right edge is a boundary too (after the last column); the left
+        // edge of a body row's bottom is a row marker.
+        cx.simulate_mouse_move(
+            point(cell1.origin.x + cell1.size.width, cell0.origin.y),
+            None,
+            gpui::Modifiers::default(),
+        );
+        cx.run_until_parked();
+        assert_eq!(marker(&mut cx).map(|m| m.column), Some(Some(2)));
+        let body = TABLE_DOC.find("| e").unwrap();
+        let (body_cell, _) =
+            cx.update(|_, cx| input.read_with(cx, |state, _| state.table_cell(body, 0).unwrap()));
+        cx.simulate_mouse_move(
+            point(
+                body_cell.origin.x,
+                body_cell.origin.y + body_cell.size.height,
+            ),
+            None,
+            gpui::Modifiers::default(),
+        );
+        cx.run_until_parked();
+        let row = marker(&mut cx).expect("a row marker");
+        assert_eq!((row.line_start, row.column), (body, None));
+
+        // Away from any boundary: none. Then back, drawn, and clicked.
+        cx.simulate_mouse_move(
+            point(cell0.origin.x + px(40.), cell0.origin.y + px(10.)),
+            None,
+            gpui::Modifiers::default(),
+        );
+        cx.run_until_parked();
+        assert!(marker(&mut cx).is_none());
+        cx.simulate_mouse_move(between, None, gpui::Modifiers::default());
+        cx.run_until_parked();
+        draw(&mut cx);
+        let before = cx.update(|_, cx| input.read_with(cx, |state, _| state.cursor()));
+        cx.simulate_click(between, gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(events.borrow().as_slice(), &[(header, Some(1))]);
+        let after = cx.update(|_, cx| input.read_with(cx, |state, _| state.cursor()));
+        assert_eq!(before, after, "the click was the marker's, not the text's");
     }
 
     /// The cell the last frame outlined on buffer line `row`.

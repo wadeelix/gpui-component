@@ -1468,6 +1468,56 @@ impl<M: InputModeKind> TextElement<M> {
     /// cannot be created during paint. Each widget is anchored with
     /// `position_for_index`, so it follows concealment and per-line font size
     /// without knowing about either.
+    /// The "+" over a table's column boundary or under one of its rows,
+    /// when the pointer is near one: an element of its own, painted last so
+    /// it owns its click, which asks the application to insert there.
+    fn layout_table_marker(&self, window: &mut Window, cx: &mut App) -> Option<gpui::AnyElement> {
+        let (marker, style) = {
+            let state = self.state.read(cx);
+            (state.table_marker.clone()?, state.editor_style.clone())
+        };
+        let weak = self.state.downgrade();
+        let (line_start, column) = (marker.line_start, marker.column);
+        let plus = gpui::div()
+            .size(px(16.))
+            .rounded_full()
+            .bg(style.foreground)
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                gpui::div()
+                    .text_color(style.background)
+                    .text_size(px(14.))
+                    .line_height(px(14.))
+                    .child("+"),
+            );
+        let element = gpui::div()
+            .id("table-insert-marker")
+            .cursor_pointer()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(plus)
+            .on_mouse_down(gpui::MouseButton::Left, move |_, _, cx| {
+                cx.stop_propagation();
+                if let Some(state) = weak.upgrade() {
+                    state.update(cx, |_, cx| {
+                        cx.emit(crate::input::InputEvent::TableInsert { line_start, column });
+                    });
+                }
+            });
+        let mut element = element.into_any_element();
+        element.prepaint_as_root(marker.bounds.origin, marker.bounds.size.into(), window, cx);
+        self.state
+            .read(cx)
+            .widget_hitboxes
+            .borrow_mut()
+            .push(marker.bounds);
+        Some(element)
+    }
+
     fn layout_inline_widgets(
         &self,
         bounds: &Bounds<Pixels>,
@@ -2124,6 +2174,8 @@ pub(super) struct PrepaintState {
     search_match_paths: Vec<(Path<Pixels>, bool)>,
     document_color_paths: Vec<(Path<Pixels>, Hsla)>,
     hover_definition_hitbox: Option<Hitbox>,
+    /// The table insertion marker under the pointer, drawn over everything.
+    table_marker: Option<gpui::AnyElement>,
     indent_guides_path: Option<Path<Pixels>>,
     bounds: Bounds<Pixels>,
     /// Fold icon layout data
@@ -2608,6 +2660,7 @@ impl<M: InputModeKind> Element for TextElement<M> {
         let fold_icon_layout =
             self.layout_fold_icons(original_x, &bounds, &last_layout, window, cx);
         let inline_widgets = self.layout_inline_widgets(&bounds, &last_layout, window, cx);
+        let table_marker = self.layout_table_marker(window, cx);
 
         PrepaintState {
             bounds,
@@ -2622,6 +2675,7 @@ impl<M: InputModeKind> Element for TextElement<M> {
             search_match_paths,
             hover_highlight_path,
             hover_definition_hitbox,
+            table_marker,
             document_color_paths,
             indent_guides_path,
             fold_icon_layout,
@@ -2940,6 +2994,9 @@ impl<M: InputModeKind> Element for TextElement<M> {
         // editor took it and moved the caret instead.
         for widget in prepaint.inline_widgets.iter_mut() {
             widget.element.paint(window, cx);
+        }
+        if let Some(marker) = prepaint.table_marker.as_mut() {
+            marker.paint(window, cx);
         }
     }
 }
