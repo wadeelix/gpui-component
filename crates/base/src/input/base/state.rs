@@ -2383,6 +2383,16 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.select_to(end, cx);
     }
 
+    /// The byte offset under a window position, when the position is inside
+    /// the editor's last-drawn bounds: for a host that reads the text there
+    /// (a link under a modified click, say) without taking the click.
+    pub fn offset_at(&self, position: Point<Pixels>) -> Option<usize> {
+        let bounds = self.last_bounds.as_ref()?;
+        bounds
+            .contains(&position)
+            .then(|| self.index_for_mouse_position(position))
+    }
+
     pub(crate) fn index_for_mouse_position(&self, position: Point<Pixels>) -> usize {
         // If the text is empty, always return 0
         if self.text.len() == 0 {
@@ -5677,6 +5687,32 @@ mod tests {
         cx.simulate_mouse_move(between, None, gpui::Modifiers::default());
         cx.run_until_parked();
         assert!(marker(&mut cx).is_some(), "on again");
+    }
+
+    /// A window position inside the editor maps to the byte under it;
+    /// outside, to nothing.
+    #[gpui::test]
+    fn offset_at_reads_the_byte_under_a_position(cx: &mut TestAppContext) {
+        let (mut cx, input) = table_editor(cx, TABLE_DOC);
+        let header = TABLE_DOC.find('|').unwrap();
+        let (cell1, _) =
+            cx.update(|_, cx| input.read_with(cx, |state, _| state.table_cell(header, 1).unwrap()));
+        let inside = cx.update(|_, cx| {
+            input.read_with(cx, |state, _| {
+                state.offset_at(cell1.origin + point(px(2.), px(2.)))
+            })
+        });
+        let (cell1_start, _) = cx.update(|_, cx| {
+            input.read_with(cx, |state, _| {
+                (state.table_cell(header, 1).unwrap().0.origin, ())
+            })
+        });
+        let _ = cell1_start;
+        assert!(inside.is_some_and(|offset| offset > header), "{inside:?}");
+        let outside = cx.update(|_, cx| {
+            input.read_with(cx, |state, _| state.offset_at(point(px(-100.), px(-100.))))
+        });
+        assert_eq!(outside, None);
     }
 
     /// The pointer near a column boundary of a table's top rule, or near a
