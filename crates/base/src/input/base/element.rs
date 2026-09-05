@@ -1478,21 +1478,26 @@ impl<M: InputModeKind> TextElement<M> {
         };
         let weak = self.state.downgrade();
         let (line_start, column) = (marker.line_start, marker.column);
+        // Two bars, not an icon or a glyph: a "+" character sits on its
+        // font's baseline, off the circle's centre by a pixel or two, and an
+        // SVG scaled to fit lands its strokes between pixels. Bars of whole
+        // pixels are crisp wherever the circle is.
+        let bar = |left: f32, top: f32, width: f32, height: f32| {
+            gpui::div()
+                .absolute()
+                .left(px(left))
+                .top(px(top))
+                .w(px(width))
+                .h(px(height))
+                .bg(style.background)
+        };
         let plus = gpui::div()
             .size(px(16.))
             .rounded_full()
             .bg(style.foreground)
-            .flex()
-            .items_center()
-            .justify_center()
-            // An icon, not a glyph: a "+" character sits on its font's
-            // baseline, off the circle's centre by a pixel or two.
-            .child(
-                gpui::svg()
-                    .path("icons/plus.svg")
-                    .size(px(11.))
-                    .text_color(style.background),
-            );
+            .relative()
+            .child(bar(4., 7., 8., 2.))
+            .child(bar(7., 4., 2., 8.));
         let element = gpui::div()
             .id("table-insert-marker")
             .cursor_pointer()
