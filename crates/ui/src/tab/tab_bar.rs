@@ -52,6 +52,7 @@ pub struct TabBar {
     size: Size,
     menu: bool,
     max_width: Option<Pixels>,
+    animated: bool,
     on_click: Option<Rc<dyn Fn(&usize, &mut Window, &mut App) + 'static>>,
 }
 
@@ -74,7 +75,20 @@ impl TabBar {
             on_click: None,
             menu: false,
             max_width: None,
+            animated: true,
         }
+    }
+
+    /// Set whether the selection indicator slides from the previous tab to
+    /// the new one (200 ms, eased) or moves at once, default is `true`.
+    ///
+    /// The slide re-renders the window for every one of its frames; in a
+    /// window whose content is expensive to lay out it plays back in a few
+    /// steps and reads as lag, while every native tab bar moves its
+    /// indicator instantly.
+    pub fn animated(mut self, animated: bool) -> Self {
+        self.animated = animated;
+        self
     }
 
     /// Set the Tab variant, all children will inherit the variant.
@@ -224,45 +238,48 @@ impl TabBar {
         let inner_height = variant.inner_height(size);
         let inner_radius = variant.inner_radius(size, cx);
 
-        let indicator = div()
-            .absolute()
-            .top_0()
-            .bottom_0()
-            .map(|el| match variant {
-                TabVariant::Segmented => el.flex().items_center().child(
-                    div()
-                        .w_full()
-                        .h(inner_height)
-                        .bg(cx.theme().tokens.background)
-                        .rounded(inner_radius)
-                        .shadow_sm(),
-                ),
-                TabVariant::Pill => el.flex().items_center().child(
-                    div()
-                        .size_full()
-                        .bg(cx.theme().tokens.primary)
-                        .rounded(cx.theme().radius_full()),
-                ),
-                TabVariant::Underline => el.child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .right_0()
-                        .bottom_0()
-                        .h(px(2.))
-                        .bg(cx.theme().tokens.primary),
-                ),
-                _ => el,
-            })
-            .with_animation(
-                ElementId::NamedInteger("tab-ind".into(), epoch),
-                Animation::new(Duration::from_millis(200)).with_easing(ease_in_out_cubic),
-                move |el, delta| {
-                    let left = Lerp::lerp(&from_left, &to_left, delta);
-                    let width = Lerp::lerp(&from_width, &to_width, delta);
-                    el.left(left).w(width)
-                },
-            );
+        let indicator = div().absolute().top_0().bottom_0().map(|el| match variant {
+            TabVariant::Segmented => el.flex().items_center().child(
+                div()
+                    .w_full()
+                    .h(inner_height)
+                    .bg(cx.theme().tokens.background)
+                    .rounded(inner_radius)
+                    .shadow_sm(),
+            ),
+            TabVariant::Pill => el.flex().items_center().child(
+                div()
+                    .size_full()
+                    .bg(cx.theme().tokens.primary)
+                    .rounded(cx.theme().radius_full()),
+            ),
+            TabVariant::Underline => el.child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .h(px(2.))
+                    .bg(cx.theme().tokens.primary),
+            ),
+            _ => el,
+        });
+
+        if !self.animated {
+            // Epoch 0 also keeps the tabs from fading their text along with
+            // a slide that is not happening.
+            return Some((indicator.left(to_left).w(to_width).into_any_element(), 0));
+        }
+
+        let indicator = indicator.with_animation(
+            ElementId::NamedInteger("tab-ind".into(), epoch),
+            Animation::new(Duration::from_millis(200)).with_easing(ease_in_out_cubic),
+            move |el, delta| {
+                let left = Lerp::lerp(&from_left, &to_left, delta);
+                let width = Lerp::lerp(&from_width, &to_width, delta);
+                el.left(left).w(width)
+            },
+        );
 
         Some((indicator.into_any_element(), epoch))
     }
