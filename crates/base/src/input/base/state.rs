@@ -368,6 +368,8 @@ pub struct InputBaseState<M: InputModeKind> {
     pub(super) widget_hitboxes: RefCell<Vec<Bounds<Pixels>>>,
     /// The table insertion marker the pointer is near, if any.
     pub(crate) table_marker: Option<TableMarker>,
+    /// Whether tables offer insertion markers under the pointer at all.
+    pub(super) table_handles: bool,
     pub(super) editor_paddings: Edges<Pixels>,
     pub(super) editor_style: InputEditorStyle,
 
@@ -656,6 +658,7 @@ impl<M: InputModeKind> InputBaseState<M> {
             editor_scrollbar_snapshot: Cell::new(None),
             widget_hitboxes: RefCell::new(Vec::new()),
             table_marker: None,
+            table_handles: true,
             editor_paddings: Edges::default(),
             deferred_scroll_offset: None,
             preferred_column: None,
@@ -1929,6 +1932,22 @@ impl<M: InputModeKind> InputBaseState<M> {
         }
     }
 
+    /// Whether a table shows insertion markers (a "+" near a column boundary
+    /// of its top rule or near a row's bottom-left corner) under the
+    /// pointer. On by default; off for a writer the markers get in the way
+    /// of.
+    pub fn table_handles(mut self, handles: bool) -> Self {
+        self.table_handles = handles;
+        self
+    }
+
+    pub fn set_table_handles(&mut self, handles: bool, cx: &mut Context<Self>) {
+        self.table_handles = handles;
+        if !handles && self.table_marker.take().is_some() {
+            cx.notify();
+        }
+    }
+
     /// The insertion marker near `position`: on the table's first row a
     /// column boundary of its top rule (one per boundary, the right edge
     /// included), on any row but the delimiter its bottom-left corner. The
@@ -1937,6 +1956,9 @@ impl<M: InputModeKind> InputBaseState<M> {
     fn marker_at(&self, position: Point<Pixels>) -> Option<TableMarker> {
         const RADIUS: Pixels = px(8.);
         const REACH: Pixels = px(12.);
+        if !self.table_handles {
+            return None;
+        }
         let bounds = self.last_bounds?;
         let layout = self.last_layout.as_ref()?;
         let left = bounds.origin.x + layout.line_number_width;
@@ -1961,6 +1983,10 @@ impl<M: InputModeKind> InputBaseState<M> {
                     if (position.x - center.x).abs() <= REACH
                         && (position.y - center.y).abs() <= REACH
                     {
+                        // Whole pixels: a column boundary sits anywhere, and
+                        // a circle drawn from a half pixel is blurred on one
+                        // side and sharp on the other.
+                        let center = center.map(|v| v.round());
                         return Some(TableMarker {
                             line_start,
                             column,
@@ -5612,6 +5638,47 @@ mod tests {
         );
     }
 
+    /// With the handles switched off, the same pointer finds no marker: a
+    /// writer who never restructures tables sees no chrome at all.
+    #[gpui::test]
+    fn no_insertion_marker_with_the_handles_off(cx: &mut TestAppContext) {
+        let (mut cx, input) = table_editor(cx, TABLE_DOC);
+        let header = TABLE_DOC.find('|').unwrap();
+        let (cell0, _) =
+            cx.update(|_, cx| input.read_with(cx, |state, _| state.table_cell(header, 0).unwrap()));
+        let (cell1, _) =
+            cx.update(|_, cx| input.read_with(cx, |state, _| state.table_cell(header, 1).unwrap()));
+        let between = point(cell1.origin.x, cell0.origin.y);
+        let marker = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| input.read_with(cx, |state, _| state.table_marker.clone()))
+        };
+
+        cx.simulate_mouse_move(between, None, gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(marker(&mut cx).is_some(), "on by default");
+
+        cx.update(|_, cx| input.update(cx, |state, cx| state.set_table_handles(false, cx)));
+        assert!(
+            marker(&mut cx).is_none(),
+            "switching off drops the one shown"
+        );
+        cx.simulate_mouse_move(
+            between + point(px(1.), px(1.)),
+            None,
+            gpui::Modifiers::default(),
+        );
+        cx.run_until_parked();
+        assert!(
+            marker(&mut cx).is_none(),
+            "and none comes back under the pointer"
+        );
+
+        cx.update(|_, cx| input.update(cx, |state, cx| state.set_table_handles(true, cx)));
+        cx.simulate_mouse_move(between, None, gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(marker(&mut cx).is_some(), "on again");
+    }
+
     /// The pointer near a column boundary of a table's top rule, or near a
     /// row's bottom-left corner, finds an insertion marker; a click on it
     /// asks the application to insert there, and moves no caret.
@@ -5650,6 +5717,11 @@ mod tests {
         let found = marker(&mut cx).expect("a marker near the boundary");
         assert_eq!((found.line_start, found.column), (header, Some(1)));
         assert!(found.bounds.contains(&between));
+        assert_eq!(
+            found.bounds.origin,
+            found.bounds.origin.map(|v| v.round()),
+            "drawn from a whole pixel"
+        );
 
         // The right edge is a boundary too (after the last column); the left
         // edge of a body row's bottom is a row marker.
