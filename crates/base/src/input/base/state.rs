@@ -855,6 +855,9 @@ impl<M: InputModeKind> InputBaseState<M> {
     /// [`Self::refresh_line_heights`].
     pub fn rewrap_lines(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
         self.display_map.rewrap(range, cx);
+        // Rows may have moved under a marker placed before; it comes back
+        // where the pointer is on the next move.
+        self.table_marker = None;
         cx.notify();
     }
 
@@ -1980,6 +1983,11 @@ impl<M: InputModeKind> InputBaseState<M> {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The marker's place is a window position over a layout the scroll
+        // moves; it comes back where the pointer is on the next move.
+        if self.table_marker.take().is_some() {
+            cx.notify();
+        }
         let line_height = self
             .last_layout
             .as_ref()
