@@ -2,20 +2,21 @@ use std::{
     cell::RefCell,
     collections::HashMap,
     ops::Range,
+    rc::Rc,
     sync::{Arc, Mutex},
 };
 
 use gpui::{
     AnyElement, App, DefiniteLength, Div, ElementId, FontStyle, FontWeight, Half, HighlightStyle,
-    Hsla, InteractiveElement as _, IntoElement, Length, ObjectFit, Overflow, ParentElement,
-    ScrollHandle, SharedString, SharedUri, StatefulInteractiveElement, Styled, StyledImage as _,
-    WhiteSpace, Window, div, img, prelude::FluentBuilder as _, px, relative, rems,
+    Hsla, InteractiveElement as _, IntoElement, ObjectFit, Overflow, ParentElement, ScrollHandle,
+    SharedString, SharedUri, StatefulInteractiveElement, Styled, StyledImage as _, WhiteSpace,
+    Window, div, img, prelude::FluentBuilder as _, px, relative, rems,
 };
 use markdown::mdast;
 use ropey::Rope;
 
 use crate::{
-    ActiveTheme as _, Icon, IconName, StyledExt, h_flex,
+    ActiveTheme as _, ElementExt as _, Icon, IconName, StyledExt, h_flex,
     highlighter::{HighlightTheme, LanguageRegistry, SyntaxHighlighter},
     input::{InputEdit, Point, RopeExt as _},
     scroll::horizontal_scroll_area,
@@ -99,6 +100,27 @@ enum BlockTextKind {
     /// Like `Selected`, but reconstructs Markdown source for the selection
     /// instead of the rendered plain text.
     SelectedSource,
+}
+
+/// What a rendered table measured of itself on its last prepaint: its own
+/// width and its columns' content widths in the cells' text style. Kept per
+/// table across frames, so the next render can size the columns from it.
+#[derive(Default)]
+struct TableMeasure {
+    width: f32,
+    max_w: Vec<f32>,
+    min_w: Vec<f32>,
+}
+
+impl TableMeasure {
+    fn is_close(&self, other: &Self) -> bool {
+        let close = |a: &[f32], b: &[f32]| {
+            a.len() == b.len() && a.iter().zip(b).all(|(a, b)| (a - b).abs() <= 0.5)
+        };
+        (self.width - other.width).abs() <= 0.5
+            && close(&self.max_w, &other.max_w)
+            && close(&self.min_w, &other.min_w)
+    }
 }
 
 impl BlockNode {
@@ -1984,30 +2006,182 @@ impl BlockNode {
         window: &mut Window,
         cx: &mut App,
     ) -> impl IntoElement {
-        const DEFAULT_LENGTH: usize = 5;
-
         let table = match item {
             BlockNode::Table(table) => table,
             _ => return div().into_any_element(),
         };
-
-        // Per-column max text length (in chars), used to proportion the columns
-        // in the default (wrap) layout.
-        let mut col_lens: Vec<usize> = vec![];
-        for row in table.children.iter() {
-            for (ix, cell) in row.children.iter().enumerate() {
-                if col_lens.len() <= ix {
-                    col_lens.push(DEFAULT_LENGTH);
-                }
-                col_lens[ix] = col_lens[ix].max(cell.children.text_len());
-            }
-        }
+        let col_count = table
+            .children
+            .iter()
+            .map(|row| row.children.len())
+            .max()
+            .unwrap_or(0);
 
         // Scroll mode is opted in via `style.table` overflow-x: scroll.
         if matches!(node_cx.style.table.overflow.x, Some(Overflow::Scroll)) {
-            Self::render_scroll_table(table, col_lens.len(), options, node_cx, window, cx)
+            Self::render_scroll_table(table, col_count, options, node_cx, window, cx)
         } else {
-            Self::render_wrap_table(table, &col_lens, options, node_cx, window, cx)
+            Self::render_wrap_table(table, col_count, options, node_cx, window, cx)
+        }
+    }
+
+    /// The plain text of every cell, row by row: what the column
+    /// measurements read, owned so a prepaint callback can hold it.
+    fn cell_texts(table: &Table) -> Vec<Vec<String>> {
+        table
+            .children
+            .iter()
+            .map(|row| {
+                row.children
+                    .iter()
+                    .map(|cell| cell.children.text())
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Per-column content widths in pixels, border-box: the widest line any
+    /// cell holds (max-content) and the widest word (min-content), each with
+    /// the cell's padding and border added, so a column of that width shows
+    /// its text unwrapped, or wrapped no tighter than one word per line.
+    /// Measured in the window's current text style, which is the cells' own
+    /// only during prepaint (the style stack is empty while elements are
+    /// built). Bold and code runs measure as plain text; the difference is
+    /// a few pixels the padding absorbs.
+    fn column_content_widths(
+        texts: &[Vec<String>],
+        col_count: usize,
+        window: &Window,
+    ) -> (Vec<f32>, Vec<f32>) {
+        const CELL_PAD_PX: f32 = 16.0; // px_2 horizontal padding
+        const CELL_MIN_PX: f32 = 48.0;
+        const CELL_BORDER_PX: f32 = 1.0; // border_r_1 drawn by every column but the last
+
+        let text_style = window.text_style();
+        let font_size = text_style.font_size.to_pixels(window.rem_size());
+        let measure = |text: &str| -> f32 {
+            let run = text_style.to_run(text.len());
+            let width = window
+                .text_system()
+                .layout_line(text, font_size, &[run], None)
+                .width;
+            // The line wrapper decides on its own accumulated advances; a
+            // line measured as exactly fitting can still come out a fraction
+            // over and wrap. A whole pixel of slack covers the rounding.
+            f32::from(width).ceil() + 1.
+        };
+        let mut max_w = vec![CELL_MIN_PX; col_count];
+        let mut min_w = vec![CELL_MIN_PX; col_count];
+        for row in texts {
+            for (ix, text) in row.iter().enumerate().take(col_count) {
+                let border = if ix + 1 < col_count {
+                    CELL_BORDER_PX
+                } else {
+                    0.
+                };
+                let chrome = CELL_PAD_PX + border;
+                for line in text.split('\n') {
+                    let line = line.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    max_w[ix] = max_w[ix].max(measure(line) + chrome);
+                    // The longest word by characters stands in for the
+                    // widest: one measurement per line, not one per word.
+                    if let Some(word) = line
+                        .split_whitespace()
+                        .max_by_key(|word| word.chars().count())
+                    {
+                        min_w[ix] = min_w[ix].max(measure(word) + chrome);
+                    }
+                }
+            }
+        }
+        (max_w, min_w)
+    }
+
+    /// Column widths for a table `available` pixels wide, from the columns'
+    /// max-content and min-content widths.
+    ///
+    /// When everything fits, the extra room is shared in proportion to
+    /// max-content, so the row fills the frame. When it does not, the
+    /// shortfall is taken in two tiers: first from the columns holding
+    /// prose (a longest line wider than `LABEL_PX`), in proportion to what
+    /// each can wrap and no further than `PROSE_FLOOR_PX`; then, only if
+    /// that is not enough, from every column in proportion to what it has
+    /// left above its min-content width. A browser's auto layout stops at
+    /// the second rule alone, and under it a two-word label wraps as soon
+    /// as any prose column has to; the first tier is what keeps the labels
+    /// whole while there is prose to wrap. Below the sum of the floors the
+    /// columns keep their floors and the row overflows.
+    fn auto_column_widths(max_w: &[f32], min_w: &[f32], available: f32) -> Vec<f32> {
+        const LABEL_PX: f32 = 160.0;
+        const PROSE_FLOOR_PX: f32 = 160.0;
+
+        let count = max_w.len();
+        let mut widths = max_w.to_vec();
+        if count == 0 {
+            return widths;
+        }
+        let total: f32 = widths.iter().sum();
+        if total <= available {
+            for w in &mut widths {
+                *w = if total > 0. {
+                    *w + (available - total) * *w / total
+                } else {
+                    available / count as f32
+                };
+            }
+            return widths;
+        }
+        let prose_floors: Vec<f32> = (0..count)
+            .map(|ix| {
+                if max_w[ix] > LABEL_PX {
+                    min_w[ix].max(PROSE_FLOOR_PX).min(max_w[ix])
+                } else {
+                    max_w[ix]
+                }
+            })
+            .collect();
+        Self::take_towards(&mut widths, &prose_floors, available);
+        let floors: Vec<f32> = (0..count).map(|ix| min_w[ix].min(max_w[ix])).collect();
+        Self::take_towards(&mut widths, &floors, available);
+        widths
+    }
+
+    /// Takes what `widths` sum to above `available` from the columns in
+    /// proportion to the room each has above its floor. A column that
+    /// reaches its floor is held there and the rest is taken from the
+    /// others; what no column can absorb is left.
+    fn take_towards(widths: &mut [f32], floors: &[f32], available: f32) {
+        loop {
+            let excess = widths.iter().sum::<f32>() - available;
+            let room: f32 = widths
+                .iter()
+                .zip(floors)
+                .map(|(w, floor)| (w - floor).max(0.))
+                .sum();
+            if excess <= 0.01 || room <= 0.01 {
+                return;
+            }
+            let take = excess.min(room);
+            let mut clamped = false;
+            for (w, floor) in widths.iter_mut().zip(floors) {
+                let above = (*w - floor).max(0.);
+                if above <= 0. {
+                    continue;
+                }
+                let target = *w - take * above / room;
+                if target < *floor {
+                    *w = *floor;
+                    clamped = true;
+                } else {
+                    *w = target;
+                }
+            }
+            if !clamped {
+                return;
+            }
         }
     }
 
@@ -2037,7 +2211,6 @@ impl BlockNode {
         window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
-        const CELL_PAD_PX: f32 = 16.0; // px_2 horizontal padding
         const CELL_MIN_PX: f32 = 48.0;
         // Shrinking columns stop (and the table starts to scroll) at a floor
         // scaled to their content: roughly the width at which the text wraps
@@ -2047,43 +2220,12 @@ impl BlockNode {
         const CELL_WRAP_MAX_LINES: f32 = 2.0;
         const CELL_WRAP_MIN_PX: f32 = 160.0;
         const CELL_WRAP_MAX_PX: f32 = 480.0;
-        const CELL_BORDER_PX: f32 = 1.0; // border_r_1 drawn by every column but the last
         const TABLE_BORDER_PX: f32 = 2.0; // the track's border_1, left + right
 
-        // Measure the widest text per column (max-content width). Never
-        // capped: a cap would clip overflowing text *and* leave it outside
-        // the scrollable width, making it unreachable.
-        let text_style = window.text_style();
-        let font_size = text_style.font_size.to_pixels(window.rem_size());
-        let mut col_w = vec![CELL_MIN_PX; col_count];
-        for row in table.children.iter() {
-            for (ix, cell) in row.children.iter().enumerate() {
-                let Some(slot) = col_w.get_mut(ix) else {
-                    continue;
-                };
-                let mut w = 0.0_f32;
-                for line in cell.children.text().split('\n') {
-                    let line = line.trim();
-                    if line.is_empty() {
-                        continue;
-                    }
-                    let run = text_style.to_run(line.len());
-                    let line_w = window
-                        .text_system()
-                        .layout_line(line, font_size, &[run], None)
-                        .width;
-                    w = w.max(f32::from(line_w));
-                }
-                // Border-box widths, so the padding and border the cell draws
-                // must leave the measured text its full width.
-                let border = if ix + 1 < col_count {
-                    CELL_BORDER_PX
-                } else {
-                    0.
-                };
-                *slot = slot.max(w + CELL_PAD_PX + border);
-            }
-        }
+        // The widest text per column (max-content width). Never capped: a
+        // cap would clip overflowing text *and* leave it outside the
+        // scrollable width, making it unreachable.
+        let (col_w, _) = Self::column_content_widths(&Self::cell_texts(table), col_count, window);
         let style = &node_cx.style;
         // Nowrap cells (via the `table_cell` refinement, which cascades to
         // the cell text) must never shrink below their single-line content,
@@ -2209,47 +2351,95 @@ impl BlockNode {
             .into_any_element()
     }
 
-    /// Default table layout: a flex grid whose columns are proportioned by
-    /// content length and shrink to fit the container width (cell text wraps).
+    /// Default table layout: a grid that fits the container width, its
+    /// columns sized by [`Self::auto_column_widths`] from their measured
+    /// content -- so a column of short labels keeps the width its labels
+    /// need and the column of prose is the one that wraps, rather than every
+    /// column being squeezed in proportion to its longest text, which left
+    /// the short ones a few characters wide beside one wide column.
+    ///
+    /// The width to lay out for, and the content widths in the cells' own
+    /// text style, come from the table's prepaint and are kept per table
+    /// across renders; the first frame, before anything is measured, lays
+    /// out by flex from a measurement in the window's default style and
+    /// asks for another frame once the prepaint has measured.
     fn render_wrap_table(
         table: &Table,
-        col_lens: &[usize],
+        col_count: usize,
         options: &NodeRenderOptions,
         node_cx: &NodeContext,
         window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
-        const MAX_LENGTH: usize = 150;
+        // A floor above this is one unbreakable word (a URL, say) wider than
+        // any column deserves; the floor is let go and the word breaks.
+        const CELL_FLOOR_MAX_PX: f32 = 480.0;
+        const TABLE_BORDER_PX: f32 = 2.0; // the frame's border_1, left + right
 
+        let view = window.current_view();
+        let measure_key = match table.span {
+            Some(span) => format!("{}-table-measure-{}:{}", view, span.start, span.end),
+            None => format!("{}-table-measure-{}", view, options.ix),
+        };
+        let measured: Rc<RefCell<TableMeasure>> = window
+            .use_keyed_state(SharedString::from(measure_key), cx, |_, _| {
+                Rc::new(RefCell::new(TableMeasure::default()))
+            })
+            .read(cx)
+            .clone();
+        let texts = Self::cell_texts(table);
+        let (max_w, min_w, widths) = {
+            let m = measured.borrow();
+            if m.width > 0. && m.max_w.len() == col_count {
+                let inner = m.width - TABLE_BORDER_PX;
+                let widths = Self::auto_column_widths(&m.max_w, &m.min_w, inner);
+                (m.max_w.clone(), m.min_w.clone(), Some(widths))
+            } else {
+                let (max_w, mut min_w) = Self::column_content_widths(&texts, col_count, window);
+                for (min, max) in min_w.iter_mut().zip(&max_w) {
+                    *min = min.min(*max).min(CELL_FLOOR_MAX_PX);
+                }
+                (max_w, min_w, None)
+            }
+        };
         let style = &node_cx.style;
         let row_count = table.children.len();
         let mut rows = Vec::with_capacity(row_count);
         for (row_ix, row) in table.children.iter().enumerate() {
-            let mut cells = Vec::with_capacity(row.children.len());
-            for (ix, cell) in row.children.iter().enumerate() {
+            let mut cells = Vec::with_capacity(col_count);
+            // Every row lays out all the columns, a short row with empty
+            // cells: the rows are flex rows of their own, and they line up
+            // only when each carries the same columns.
+            for ix in 0..col_count {
                 let align = table.column_align(ix);
-                let is_last_col = ix == row.children.len() - 1;
-                let len = col_lens
-                    .get(ix)
-                    .copied()
-                    .unwrap_or(MAX_LENGTH)
-                    .min(MAX_LENGTH);
+                let is_last_col = ix + 1 == col_count;
+                let (max, min) = (max_w[ix], min_w[ix]);
 
                 cells.push(
                     div()
                         .id(("cell", ix))
+                        .map(|this| match &widths {
+                            Some(widths) => this.w(px(widths[ix])).flex_shrink_0(),
+                            // Width unknown yet: a flex approximation, the
+                            // shrink weighted by what each column can wrap.
+                            None => this
+                                .flex_basis(px(max))
+                                .flex_grow(max)
+                                .flex_shrink(if max > 0. { (max - min) / max } else { 0. })
+                                .min_w(px(min)),
+                        })
                         .overflow_hidden()
                         .when(align == ColumnumnAlign::Center, |this| this.text_center())
                         .when(align == ColumnumnAlign::Right, |this| this.text_right())
-                        .min_w_16()
-                        .w(Length::Definite(relative(len as f32)))
                         .px_2()
                         .py_1()
                         .when(!is_last_col, |this| {
                             this.border_r_1().border_color(cx.theme().border)
                         })
                         .refine_style(&style.table_cell)
-                        .child(cell.children.render(node_cx, window, cx)),
+                        .when_some(row.children.get(ix), |this, cell| {
+                            this.child(cell.children.render(node_cx, window, cx))
+                        }),
                 );
             }
 
@@ -2277,7 +2467,27 @@ impl BlockNode {
                     .rounded(cx.theme().radius)
                     .overflow_hidden()
                     .children(rows)
-                    .refine_style(&style.table),
+                    .refine_style(&style.table)
+                    .on_prepaint(move |bounds, window, cx| {
+                        let width = f32::from(bounds.size.width);
+                        let (max_w, mut min_w) =
+                            Self::column_content_widths(&texts, col_count, window);
+                        for (min, max) in min_w.iter_mut().zip(&max_w) {
+                            *min = min.min(*max).min(CELL_FLOOR_MAX_PX);
+                        }
+                        let next = TableMeasure {
+                            width,
+                            max_w,
+                            min_w,
+                        };
+                        // Asking for a frame only on a change keeps this
+                        // from re-rendering forever: the measurement is
+                        // deterministic, so it settles on the second frame.
+                        if !measured.borrow().is_close(&next) {
+                            *measured.borrow_mut() = next;
+                            cx.notify(view);
+                        }
+                    }),
             )
             // Custom actions row (e.g. copy / download) rendered below the
             // table. The hook's element spans full width; alignment is up to
@@ -2735,6 +2945,51 @@ mod tests {
             column_aligns,
             span: None,
         }
+    }
+
+    #[test]
+    fn columns_that_fit_share_the_extra_room_by_content() {
+        let widths = BlockNode::auto_column_widths(&[100., 200.], &[50., 50.], 600.);
+        assert_eq!(widths, [200., 400.]);
+        assert!(BlockNode::auto_column_widths(&[], &[], 600.).is_empty());
+        let empty = BlockNode::auto_column_widths(&[0., 0.], &[0., 0.], 100.);
+        assert_eq!(empty, [50., 50.]);
+    }
+
+    /// The owner's case: two label columns and one of prose, in a frame
+    /// narrower than their longest lines. The prose wraps, the labels do
+    /// not -- a browser's layout would have wrapped "cell editing" as well.
+    #[test]
+    fn prose_wraps_before_a_label_does() {
+        let max = [100., 70., 620.];
+        let min = [65., 70., 50.];
+        let widths = BlockNode::auto_column_widths(&max, &min, 600.);
+        assert_eq!(widths[0], 100.);
+        assert_eq!(widths[1], 70.);
+        assert!((widths[2] - 430.).abs() < 0.01, "{widths:?}");
+    }
+
+    /// Narrower still: the prose column stops at its floor, and only then
+    /// do the labels give up width, each in proportion to what it has
+    /// above its longest word.
+    #[test]
+    fn labels_wrap_only_once_the_prose_is_at_its_floor() {
+        let max = [100., 70., 620.];
+        let min = [65., 70., 50.];
+        let widths = BlockNode::auto_column_widths(&max, &min, 300.);
+        let sum: f32 = widths.iter().sum();
+        assert!((sum - 300.).abs() < 0.01, "{widths:?}");
+        assert!(widths[0] < 100. && widths[0] > 65., "{widths:?}");
+        assert_eq!(widths[1], 70., "nothing to wrap: {widths:?}");
+        assert!(widths[2] < 160. && widths[2] > 50., "{widths:?}");
+    }
+
+    /// Below the sum of the min-content widths the columns keep them and
+    /// the row overflows rather than breaking words at a character.
+    #[test]
+    fn columns_never_go_below_their_longest_word() {
+        let widths = BlockNode::auto_column_widths(&[100., 100.], &[80., 80.], 100.);
+        assert_eq!(widths, [80., 80.]);
     }
 
     #[test]
