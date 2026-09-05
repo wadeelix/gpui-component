@@ -1485,12 +1485,13 @@ impl<M: InputModeKind> TextElement<M> {
             .flex()
             .items_center()
             .justify_center()
+            // An icon, not a glyph: a "+" character sits on its font's
+            // baseline, off the circle's centre by a pixel or two.
             .child(
-                gpui::div()
-                    .text_color(style.background)
-                    .text_size(px(14.))
-                    .line_height(px(14.))
-                    .child("+"),
+                gpui::svg()
+                    .path("icons/plus.svg")
+                    .size(px(11.))
+                    .text_color(style.background),
             );
         let element = gpui::div()
             .id("table-insert-marker")
