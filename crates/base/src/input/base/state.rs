@@ -3085,6 +3085,9 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
             M::on_text_typed(self, &range, &new_text, window, cx);
         }
         if self.emit_events {
+            // The marker was placed on a layout this change replaces; it
+            // comes back where the pointer is on the next move.
+            self.table_marker = None;
             cx.emit(InputEvent::Change);
         }
         cx.notify();
@@ -5681,6 +5684,17 @@ mod tests {
         assert_eq!(events.borrow().as_slice(), &[(header, Some(1))]);
         let after = cx.update(|_, cx| input.read_with(cx, |state, _| state.cursor()));
         assert_eq!(before, after, "the click was the marker's, not the text's");
+
+        // A change to the text drops the marker until the pointer moves.
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.replace_text_in_range(None, "x", window, cx)
+            })
+        });
+        assert!(
+            marker(&mut cx).is_none(),
+            "gone with the layout it was placed on"
+        );
     }
 
     /// The cell the last frame outlined on buffer line `row`.
