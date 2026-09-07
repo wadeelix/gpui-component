@@ -8,7 +8,7 @@ use crate::text::{
     markdown_ext::MarkdownParseContext,
     node::{
         self, BlockNode, CodeBlock, ImageNode, InlineNode, LinkMark, NodeContext, Paragraph, Span,
-        Table, TableRow, TextMark,
+        Table, TableRow, TaskMark, TextMark,
     },
 };
 
@@ -338,6 +338,69 @@ fn new_span(pos: Option<markdown::unist::Position>, cx: &NodeContext) -> Option<
     })
 }
 
+/// The task box a list item opens with, and how many bytes of its text the
+/// box occupies.
+///
+/// Only for the boxes CommonMark does not parse: `[ ]` and `[x]` reach us as
+/// `ListItem::checked` with the brackets already consumed. The others are
+/// plain text, so they are read off the item's own source and the caller
+/// drops those bytes from the rendered text.
+fn task_mark(source: &str, item: &mdast::ListItem) -> Option<(TaskMark, usize)> {
+    let position = item.position.as_ref()?;
+    let text = source.get(position.start.offset..position.end.offset)?;
+    // Past the bullet or the ordered number, to the box itself.
+    let after_marker = text
+        .find(['[', '\n'])
+        .filter(|ix| text.as_bytes()[*ix] == b'[')?;
+    let rest = &text[after_marker..];
+    let mut chars = rest.chars();
+    if chars.next()? != '[' {
+        return None;
+    }
+    let inner = chars.next()?;
+    if chars.next()? != ']' {
+        return None;
+    }
+    // A box is a box only when a space follows it; `[-]x` is ordinary text.
+    let box_len = 2 + inner.len_utf8();
+    let space = rest[box_len..].starts_with(' ') as usize;
+    if space == 0 {
+        return None;
+    }
+    let mark = TaskMark::from_char(inner)?;
+    // `[ ]` and `[x]` never reach here, so a match is one of the three the
+    // parser leaves in the text.
+    matches!(
+        mark,
+        TaskMark::Doing | TaskMark::Waiting | TaskMark::Cancelled
+    )
+    .then_some((mark, box_len + space))
+}
+
+/// Drops `count` bytes from the head of the first text this item renders, so
+/// a box read out of the source is not also drawn as brackets.
+fn strip_leading_text(children: &mut [BlockNode], count: usize) {
+    let Some(BlockNode::Paragraph(paragraph)) = children.first_mut() else {
+        return;
+    };
+    let Some(first) = paragraph.children.first_mut() else {
+        return;
+    };
+    let text = first.text.as_ref();
+    if !text.is_char_boundary(count.min(text.len())) {
+        return;
+    }
+    let kept = text[count.min(text.len())..].to_string();
+    let shift = text.len() - kept.len();
+    first.text = kept.into();
+    // The marks index into the text that just moved.
+    first.marks.retain_mut(|(range, _)| {
+        range.start = range.start.saturating_sub(shift);
+        range.end = range.end.saturating_sub(shift);
+        range.end > range.start
+    });
+}
+
 fn ast_to_node(source: &str, value: mdast::Node, cx: &mut NodeContext) -> BlockNode {
     let span = new_span(value.position().cloned(), cx);
     let parse_cx = MarkdownParseContext::new(source, cx.offset);
@@ -380,15 +443,35 @@ fn ast_to_node(source: &str, value: mdast::Node, cx: &mut NodeContext) -> BlockN
             }
         }
         Node::ListItem(val) => {
-            let children = val
+            // CommonMark knows `[ ]` and `[x]` only; the three other boxes
+            // (spec: doing, waiting, cancelled) reach the parser as ordinary
+            // text at the head of the item's first paragraph. `task_mark`
+            // recognises those and reports how many bytes to drop, so the
+            // box is not drawn twice -- once as a square, once as brackets.
+            let mark = val
+                .checked
+                .map(|checked| {
+                    if checked {
+                        (TaskMark::Done, 0)
+                    } else {
+                        (TaskMark::Todo, 0)
+                    }
+                })
+                .or_else(|| task_mark(source, &val));
+            let checked = mark.map(|(mark, _)| mark);
+            let strip = mark.map_or(0, |(_, strip)| strip);
+            let mut children: Vec<BlockNode> = val
                 .children
                 .into_iter()
                 .map(|c| ast_to_node(source, c, cx))
                 .collect();
+            if strip > 0 {
+                strip_leading_text(&mut children, strip);
+            }
             BlockNode::ListItem {
                 children,
                 spread: val.spread,
-                checked: val.checked,
+                checked,
                 span: new_span(val.position, cx),
             }
         }
@@ -531,6 +614,57 @@ mod tests {
     use gpui::ParentElement;
 
     use crate::text::{MarkdownExtensions, MarkdownNode, MarkdownPlugin};
+
+    /// The three boxes CommonMark does not parse are read off the source, and
+    /// their brackets leave the rendered text so the box is not drawn twice.
+    #[test]
+    fn task_boxes_beyond_commonmark_are_recognised_and_their_brackets_dropped() {
+        let mut cx = NodeContext::default();
+        let document = parse(
+            "- [ ] open\n- [x] done\n- [/] doing\n- [?] waiting\n- [-] dropped\n- [z] not a box\n- [-]tight\n",
+            &mut cx,
+        )
+        .unwrap();
+
+        let BlockNode::List { children, .. } = &document.blocks[0] else {
+            panic!("expected a list");
+        };
+        let items: Vec<(Option<TaskMark>, String)> = children
+            .iter()
+            .map(|child| {
+                let BlockNode::ListItem {
+                    checked, children, ..
+                } = child
+                else {
+                    panic!("expected a list item");
+                };
+                let BlockNode::Paragraph(paragraph) = &children[0] else {
+                    panic!("expected a paragraph");
+                };
+                let text: String = paragraph
+                    .children
+                    .iter()
+                    .map(|node| node.text.to_string())
+                    .collect();
+                (*checked, text)
+            })
+            .collect();
+
+        assert_eq!(
+            items,
+            vec![
+                (Some(TaskMark::Todo), "open".to_owned()),
+                (Some(TaskMark::Done), "done".to_owned()),
+                (Some(TaskMark::Doing), "doing".to_owned()),
+                (Some(TaskMark::Waiting), "waiting".to_owned()),
+                (Some(TaskMark::Cancelled), "dropped".to_owned()),
+                // An unknown character is not a box, and a box with no space
+                // after it is ordinary text.
+                (None, "[z] not a box".to_owned()),
+                (None, "[-]tight".to_owned()),
+            ]
+        );
+    }
 
     #[test]
     fn test_nested_emphasis_merges_text_marks() {

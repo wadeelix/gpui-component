@@ -38,6 +38,53 @@ use super::{
 const CHECK_SVG_LIGHT: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none"><path d="m3.25 8.25 3 3 6.5-7" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>"#;
 const CHECK_SVG_DARK: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none"><path d="m3.25 8.25 3 3 6.5-7" stroke="black" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>"#;
 
+/// The state of a task list item's box.
+///
+/// CommonMark has only `[ ]` and `[x]`; the three others are the convention
+/// Obsidian-style vaults use and this renderer draws them from the same
+/// family, so a list of mixed states reads as one column. Each is drawn by
+/// the renderer in the theme's own colour rather than shipped as an image,
+/// which has no colour to inherit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskMark {
+    /// `[ ]`
+    Todo,
+    /// `[x]` or `[X]`
+    Done,
+    /// `[/]`
+    Doing,
+    /// `[?]`
+    Waiting,
+    /// `[-]`
+    Cancelled,
+}
+
+impl TaskMark {
+    /// The mark a box's inner character stands for, or `None` when the
+    /// character is not one this renderer knows.
+    pub fn from_char(c: char) -> Option<Self> {
+        match c {
+            ' ' => Some(Self::Todo),
+            'x' | 'X' => Some(Self::Done),
+            '/' => Some(Self::Doing),
+            '?' => Some(Self::Waiting),
+            '-' => Some(Self::Cancelled),
+            _ => None,
+        }
+    }
+
+    /// The Markdown box, as the source writes it.
+    pub fn source(self) -> &'static str {
+        match self {
+            Self::Todo => "[ ] ",
+            Self::Done => "[x] ",
+            Self::Doing => "[/] ",
+            Self::Waiting => "[?] ",
+            Self::Cancelled => "[-] ",
+        }
+    }
+}
+
 /// The block-level nodes.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum BlockNode {
@@ -65,8 +112,8 @@ pub(crate) enum BlockNode {
     ListItem {
         children: Vec<BlockNode>,
         spread: bool,
-        /// Whether the list item is checked, if None, it's not a checkbox
-        checked: Option<bool>,
+        /// The task box's state, if the item carries one at all.
+        checked: Option<TaskMark>,
         span: Option<Span>,
     },
     CodeBlock(CodeBlock),
@@ -740,11 +787,7 @@ fn list_selected_source(children: &[BlockNode], ordered: bool, indent: &str) -> 
         } else {
             "- ".to_string()
         };
-        let checkbox = match checked {
-            Some(true) => "[x] ",
-            Some(false) => "[ ] ",
-            None => "",
-        };
+        let checkbox = checked.map_or("", |mark| mark.source());
         let child_indent = format!("{}{}", indent, " ".repeat(marker.len()));
 
         // Split the item into its own content and any nested lists, so the
@@ -1751,11 +1794,7 @@ impl BlockNode {
             BlockNode::ListItem {
                 children, checked, ..
             } => {
-                let checkbox = if let Some(checked) = checked {
-                    if *checked { "[x] " } else { "[ ] " }
-                } else {
-                    ""
-                };
+                let checkbox = checked.map_or("", |mark| mark.source());
                 format!(
                     "{}{}",
                     checkbox,
@@ -1807,7 +1846,7 @@ impl BlockNode {
         content: AnyElement,
         ix: usize,
         options: NodeRenderOptions,
-        checked: Option<bool>,
+        checked: Option<TaskMark>,
         style: &TextViewStyle,
         line_height: Pixels,
     ) -> Div {
@@ -1821,13 +1860,7 @@ impl BlockNode {
             .when(!options.todo && checked.is_none(), |this| {
                 this.child(list_item_prefix(ix, options.ordered, options.depth))
             })
-            .when_some(checked, |this, checked| {
-                // Todo list checkbox
-                let check_svg = if style.is_dark() {
-                    CHECK_SVG_DARK
-                } else {
-                    CHECK_SVG_LIGHT
-                };
+            .when_some(checked, |this, mark| {
                 this.child(
                     div()
                         .flex()
@@ -1836,27 +1869,87 @@ impl BlockNode {
                         .flex_none()
                         .items_center()
                         .justify_center()
-                        .child(
-                            div()
-                                .flex()
-                                .size(rems(0.875))
-                                .items_center()
-                                .justify_center()
-                                .border_1()
-                                .border_color(style.foreground())
-                                .when(checked, |this| {
-                                    this.bg(style.foreground()).child(
-                                        img(Arc::new(Image::from_bytes(
-                                            ImageFormat::Svg,
-                                            check_svg.to_vec(),
-                                        )))
-                                        .size(rems(0.625)),
-                                    )
-                                }),
-                        ),
+                        .child(Self::task_box(mark, style)),
                 )
             })
             .child(div().flex_1().min_w_0().overflow_hidden().child(content))
+    }
+
+    /// The square a task list item is drawn with.
+    ///
+    /// Every state is one square of the same size and stroke, so a list of
+    /// mixed states reads as one column; what changes is what sits inside it.
+    /// The colour is the style's own foreground, so the box follows the theme
+    /// -- an SVG shipped as an image has no colour to inherit and would stay
+    /// black on a dark background.
+    fn task_box(mark: TaskMark, style: &TextViewStyle) -> Div {
+        let foreground = style.foreground();
+        let check_svg = if style.is_dark() {
+            CHECK_SVG_DARK
+        } else {
+            CHECK_SVG_LIGHT
+        };
+        let box_ = div()
+            .flex()
+            .size(rems(0.875))
+            .items_center()
+            .justify_center()
+            .border_1()
+            .border_color(foreground);
+        match mark {
+            TaskMark::Todo => box_,
+            TaskMark::Done => box_.bg(foreground).child(
+                img(Arc::new(Image::from_bytes(
+                    ImageFormat::Svg,
+                    check_svg.to_vec(),
+                )))
+                .size(rems(0.625)),
+            ),
+            // A filled dot at the centre: work has started.
+            TaskMark::Doing => box_.child(
+                div()
+                    .size(rems(0.3125))
+                    .rounded_full()
+                    .bg(foreground)
+                    .into_any_element(),
+            ),
+            // A bar across the middle: blocked on something else.
+            TaskMark::Waiting => box_.child(
+                div()
+                    .w(rems(0.4375))
+                    .h(px(1.5))
+                    .bg(foreground)
+                    .into_any_element(),
+            ),
+            // A diagonal through the box: dropped. An image has no colour to
+            // inherit, so the theme's foreground is written into the SVG
+            // itself rather than left as `currentColor`.
+            TaskMark::Cancelled => box_.child(
+                img(Arc::new(Image::from_bytes(
+                    ImageFormat::Svg,
+                    Self::slash_svg_bytes(foreground),
+                )))
+                .size(rems(0.625))
+                .into_any_element(),
+            ),
+        }
+    }
+
+    /// The cancelled box's diagonal, in `colour`.
+    ///
+    /// GPUI renders an image with no notion of the element's text colour, so
+    /// the stroke cannot be `currentColor`; the colour is substituted here.
+    fn slash_svg_bytes(colour: Hsla) -> Vec<u8> {
+        let rgb = colour.to_rgb();
+        let (r, g, b) = (
+            (rgb.r * 255.0).round() as u8,
+            (rgb.g * 255.0).round() as u8,
+            (rgb.b * 255.0).round() as u8,
+        );
+        format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none"><path d="M3.5 12.5 12.5 3.5" stroke="#{r:02x}{g:02x}{b:02x}" stroke-width="1.8" stroke-linecap="round"/></svg>"##
+        )
+        .into_bytes()
     }
 
     fn render_list_item(
@@ -2958,13 +3051,13 @@ mod tests {
                 BlockNode::ListItem {
                     children: vec![BlockNode::Paragraph(selected_paragraph("done"))],
                     spread: false,
-                    checked: Some(true),
+                    checked: Some(TaskMark::Done),
                     span: None,
                 },
                 BlockNode::ListItem {
                     children: vec![BlockNode::Paragraph(selected_paragraph("todo"))],
                     spread: false,
-                    checked: Some(false),
+                    checked: Some(TaskMark::Todo),
                     span: None,
                 },
             ],
