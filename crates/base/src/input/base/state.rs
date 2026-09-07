@@ -2858,6 +2858,32 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.select_to(end, cx);
     }
 
+    /// The insets this editor's text sits inside: the gutter it reserved on
+    /// the left of the last frame, and the margin it keeps on the right.
+    ///
+    /// An application that draws its own blocks above or below the editor -- a
+    /// property sheet over a note's frontmatter, say -- lines its content up
+    /// with the text by taking these, rather than deriving them from the mode
+    /// flags: the gutter is measured, and a fold icon or a line number changes
+    /// it. Soft wrap lays text out in `width - gutter - RIGHT_MARGIN` and the
+    /// run is drawn `gutter` from the left edge, with the glyphs' own bearing
+    /// setting the ink a further margin in; taking the margin at each end is
+    /// what puts such a block over the text rather than a few pixels outside
+    /// it.
+    pub fn text_insets(&self) -> Edges<Pixels> {
+        let gutter = self
+            .last_layout
+            .as_ref()
+            .map(|layout| layout.line_number_width)
+            .unwrap_or(px(0.));
+        Edges {
+            top: px(0.),
+            right: crate::input::element::RIGHT_MARGIN,
+            bottom: px(0.),
+            left: gutter + crate::input::element::RIGHT_MARGIN,
+        }
+    }
+
     /// The byte offset under a window position, when the position is inside
     /// the editor's last-drawn bounds: for a host that reads the text there
     /// (a link under a modified click, say) without taking the click.
