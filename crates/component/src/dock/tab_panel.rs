@@ -10,30 +10,30 @@ use std::{
     collections::HashSet,
     rc::Rc,
     sync::Arc,
-    time::Duration,
 };
 
 use gpui::{
-    Anchor, Animation, AnimationExt as _, AnyElement, AnyView, App, AppContext as _, Context, Div,
-    Empty, InteractiveElement as _, IntoElement, ParentElement as _, Point, Render, ScrollHandle,
-    SharedString, Stateful, StatefulInteractiveElement as _, StyleRefinement, Styled as _, Window,
-    div, prelude::FluentBuilder as _, px,
+    Anchor, AnyElement, AnyView, App, AppContext as _, Context, Div, Empty,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, ScrollHandle, SharedString,
+    Stateful, StatefulInteractiveElement as _, StyleRefinement, Styled as _, Window, div,
+    prelude::FluentBuilder as _, px,
 };
-use gpui_base::dock::{
-    AnyDrag, DockPlacement, DragPanel, DropIndicator, NodeId, PaneNode, PaneRef, PanelId,
-    TabGroupContext, TabGroupRenderer,
+use gpui_base::{
+    dock::{
+        AnyDrag, DockPlacement, DragPanel, DropIndicator, NodeId, PaneNode, PaneRef, PanelId,
+        TabGroupContext, TabGroupRenderer,
+    },
+    spring,
 };
 use rust_i18n::t;
 
 use crate::{
     ActiveTheme as _, IconName, Selectable as _, Sizable as _,
-    animation::{Lerp as _, ease_out_cubic},
     button::{Button, ButtonVariants as _},
     dock::{ClosePanel, PanelControl, PanelHandle, PanelStyle, SkinShared, ToggleZoom},
     h_flex,
     menu::DropdownMenu as _,
     tab::{Tab, TabBar},
-    v_flex,
 };
 
 /// Names the tab bar's zoom button in the debug-bounds map, so a test can ask
@@ -283,7 +283,7 @@ impl TabGroupSkin {
         let control = zoom_control(group, cx);
         let toolbar_zoom = control.is_some_and(|control| control.toolbar_visible());
         let menu_zoom = control.is_some_and(|control| control.menu_visible());
-        let closable = group.can_close();
+        let closable = group.is_closable();
         let buttons = handle.and_then(|handle| handle.toolbar_buttons(window, cx));
         let panel = handle.map(|handle| handle.panel());
 
@@ -636,16 +636,10 @@ impl TabGroupRenderer for TabGroupSkin {
     fn frame(&self, group: &TabGroupContext, _: &mut Window, cx: &mut App) -> Stateful<Div> {
         let control = zoom_control(group, cx);
 
-        // `v_flex`, not `div`: gpui's default display is Block, and in block
-        // layout a child's `flex_grow` is ignored — the content region below
-        // the tab bar would resolve to zero height, because its only
-        // descendant is the panel view, positioned absolutely by `cached` and
-        // contributing no content height. The old `TabPanel::bind_actions`
-        // returned `v_flex()` for the same reason.
-        v_flex()
+        // The column, the fill and the clip are base's now, applied around
+        // this. What is left is the background and the two actions.
+        div()
             .id("tab-panel")
-            .size_full()
-            .overflow_hidden()
             .bg(cx.theme().tokens.background)
             // A collapsed group is a strip of tabs with no content, and the
             // actions act on content. The old dock gated them the same way.
@@ -689,12 +683,9 @@ impl TabGroupRenderer for TabGroupSkin {
                 .and_then(PanelHandle::of)
                 .is_none_or(|handle| handle.inner_padding(cx));
 
-        v_flex()
-            .id("active-panel")
-            // A collapsed group draws its tab strip and nothing else, so the
-            // content region must not claim any space.
-            .when(!group.is_collapsed(), |this| this.flex_1())
-            .when(padded, |this| this.pt_2())
+        // The fill and the collapsed-group exception are base's; the padding
+        // is this skin's, and is the only reason this hook is implemented.
+        div().id("active-panel").when(padded, |this| this.pt_2())
     }
 
     fn render_tab_bar(
@@ -743,40 +734,42 @@ impl TabGroupRenderer for TabGroupSkin {
     fn render_drop_indicator(
         &self,
         indicator: DropIndicator,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut App,
     ) -> Option<AnyElement> {
-        let (from, to) = (indicator.from(), indicator.to());
-        // The placeholder animates from wherever it was to where the drop
-        // would land, so its own element is positioned at the destination and
-        // the animation only has to walk the difference back to zero.
-        let offset = from.origin() - to.origin();
+        let to = indicator.to();
+        // The placeholder chases the drop it would land in. Its rect was
+        // previously replayed from the drag source on every epoch, so crossing
+        // several drop zones in one drag restarted the walk at each one; the
+        // springs carry it through instead, and the element no longer needs an
+        // outer frame to hold the destination while an inner one walks to it.
+        let id = "drop-placeholder";
+        let placeholder_spring = cx.theme().motion_tokens().spring_move.with_epsilon(0.5);
+        let left = spring((id, "left"), to.origin().x, placeholder_spring, window, cx);
+        let top = spring((id, "top"), to.origin().y, placeholder_spring, window, cx);
+        let width = spring(
+            (id, "width"),
+            to.size().width,
+            placeholder_spring,
+            window,
+            cx,
+        );
+        let height = spring(
+            (id, "height"),
+            to.size().height,
+            placeholder_spring,
+            window,
+            cx,
+        );
 
         Some(
             div()
                 .absolute()
-                .left(to.origin().x)
-                .top(to.origin().y)
-                .w(to.size().width)
-                .h(to.size().height)
-                .child(
-                    div()
-                        .absolute()
-                        .bg(cx.theme().tokens.drop_target)
-                        .with_animation(
-                            gpui::ElementId::NamedInteger(
-                                "drop-placeholder".into(),
-                                indicator.epoch(),
-                            ),
-                            Animation::new(Duration::from_millis(150)).with_easing(ease_out_cubic),
-                            move |this, delta| {
-                                let origin = offset.lerp(&Point::default(), delta);
-                                let width = from.size().width.lerp(&to.size().width, delta);
-                                let height = from.size().height.lerp(&to.size().height, delta);
-                                this.left(origin.x).top(origin.y).w(width).h(height)
-                            },
-                        ),
-                )
+                .bg(cx.theme().tokens.drop_target)
+                .left(left)
+                .top(top)
+                .w(width)
+                .h(height)
                 .into_any_element(),
         )
     }

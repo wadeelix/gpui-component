@@ -8,19 +8,38 @@ use sum_tree::Bias;
 use super::{InputBaseState, RopeExt as _};
 use crate::text_boundary::word_range_from_chars;
 
+/// Unique identifier for a cursor/selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, PartialOrd, Ord)]
+pub(super) struct CursorId(usize);
+
+impl CursorId {
+    pub(super) fn new(id: usize) -> Self {
+        Self(id)
+    }
+}
+
 impl<M: InputModeKind> InputBaseState<M> {
     /// Select the word at the given offset on double-click.
     ///
     /// The offset is the UTF-8 offset.
     pub(super) fn select_word(&mut self, offset: usize, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(range) = TextSelector::word_range(&self.text, offset) else {
-            return;
+        // A masked value renders as one unbroken run of mask characters, so it
+        // has no word boundaries to select by. Take all of it instead, rather
+        // than let the selection highlight reveal where the words are.
+        let range = if self.masked {
+            0..self.text.len()
+        } else {
+            let Some(range) = TextSelector::word_range(&self.text, offset) else {
+                return;
+            };
+            range
         };
         let range = self.word_within_cell(offset, range);
 
         self.undo_manager.break_transaction_coalescing();
-        self.selected_range = (range.start..range.end).into();
-        self.selected_word_range = (!range.is_empty()).then_some(self.selected_range);
+        self.selections.remove_all_but_active();
+        self.set_selection(range.start, range.end);
+        self.selected_word_range = Some(*self.active_selection());
         cx.notify()
     }
 
@@ -80,7 +99,8 @@ impl<M: InputModeKind> InputBaseState<M> {
     pub(super) fn select_line(&mut self, offset: usize, _: &mut Window, cx: &mut Context<Self>) {
         let range = TextSelector::line_range(&self.text, offset);
         self.undo_manager.break_transaction_coalescing();
-        self.selected_range = (range.start..range.end).into();
+        self.selections.remove_all_but_active();
+        self.set_selection(range.start, range.end);
         self.selected_word_range = None;
         cx.notify()
     }

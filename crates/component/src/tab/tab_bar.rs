@@ -1,21 +1,20 @@
-use std::{cell::RefCell, rc::Rc, time::Duration};
+use std::{cell::RefCell, rc::Rc};
 
 use gpui::{
-    Anchor, Animation, AnimationExt as _, AnyElement, App, Background, Bounds, Edges, ElementId,
-    InteractiveElement, IntoElement, ParentElement, Pixels, RenderOnce, ScrollHandle, SharedString,
-    StatefulInteractiveElement as _, StyleRefinement, Styled, Window, div,
-    prelude::FluentBuilder as _, px,
+    Anchor, AnyElement, App, Background, Bounds, Edges, ElementId, InteractiveElement, IntoElement,
+    ParentElement, Pixels, RenderOnce, ScrollHandle, SharedString, StatefulInteractiveElement as _,
+    StyleRefinement, Styled, Window, div, prelude::FluentBuilder as _, px,
 };
+use gpui_base::spring;
 use rust_i18n::t;
 use smallvec::SmallVec;
 
 use super::{Tab, TabVariant};
-use crate::animation::{Lerp, ease_in_out_cubic};
 use crate::button::{Button, ButtonVariants as _};
 use crate::menu::{DropdownMenu as _, PopupMenuItem};
 use crate::{
     ActiveTheme, ElementExt, Icon, InteractiveElementExt as _, Selectable, Sizable, Size,
-    StyledExt, h_flex,
+    StyledExt, h_flex, styled::raised_shadow,
 };
 
 struct TabIndicatorBounds {
@@ -52,7 +51,6 @@ pub struct TabBar {
     size: Size,
     menu: bool,
     max_width: Option<Pixels>,
-    animated: bool,
     on_click: Option<Rc<dyn Fn(&usize, &mut Window, &mut App) + 'static>>,
 }
 
@@ -75,20 +73,7 @@ impl TabBar {
             on_click: None,
             menu: false,
             max_width: None,
-            animated: true,
         }
-    }
-
-    /// Set whether the selection indicator slides from the previous tab to
-    /// the new one (200 ms, eased) or moves at once, default is `true`.
-    ///
-    /// The slide re-renders the window for every one of its frames; in a
-    /// window whose content is expensive to lay out it plays back in a few
-    /// steps and reads as lag, while every native tab bar moves its
-    /// indicator instantly.
-    pub fn animated(mut self, animated: bool) -> Self {
-        self.animated = animated;
-        self
     }
 
     /// Set the Tab variant, all children will inherit the variant.
@@ -197,6 +182,7 @@ impl TabBar {
     fn render_indicator(
         &self,
         bounds_rc: &Option<Rc<RefCell<TabIndicatorBounds>>>,
+        inset: Pixels,
         window: &mut Window,
         cx: &mut App,
     ) -> Option<(AnyElement, u64)> {
@@ -216,9 +202,8 @@ impl TabBar {
         let init_key = format!("{}-tab-init", self.id);
 
         let prev_selected = window.use_keyed_state(prev_key, cx, |_, _| selected_ix);
-        // (from_left, from_width, to_left, to_width, epoch)
-        let anim_params =
-            window.use_keyed_state(anim_key, cx, |_, _| (px(0.), px(0.), px(0.), px(0.), 0u64));
+        // (to_left, to_width, epoch)
+        let anim_params = window.use_keyed_state(anim_key, cx, |_, _| (px(0.), px(0.), 0u64));
         let initialized = window.use_keyed_state(init_key, cx, |_, _| false);
 
         // First frame: trigger re-render to capture bounds via on_prepaint
@@ -228,58 +213,67 @@ impl TabBar {
 
         self.update_anim_params(selected_ix, bounds_rc, &prev_selected, &anim_params, cx);
 
-        let (from_left, from_width, to_left, to_width, epoch) = *anim_params.read(cx);
+        let (to_left, to_width, epoch) = *anim_params.read(cx);
         if to_width <= px(0.) {
             return None;
         }
+
+        // The springs hold the indicator's own position and velocity, so a tab
+        // switched again mid-slide is redirected from where the indicator
+        // actually is rather than restarted from the tab it left.
+        let indicator_key = format!("{}-tab-indicator", self.id);
+        let left = spring(
+            (indicator_key.clone(), "left"),
+            to_left,
+            cx.theme().motion_tokens().spring_move,
+            window,
+            cx,
+        );
+        let width = spring(
+            (indicator_key, "width"),
+            to_width,
+            cx.theme().motion_tokens().spring_move,
+            window,
+            cx,
+        );
 
         let variant = self.variant;
         let size = self.size;
         let inner_height = variant.inner_height(size);
         let inner_radius = variant.inner_radius(size, cx);
 
-        let indicator = div().absolute().top_0().bottom_0().map(|el| match variant {
-            TabVariant::Segmented => el.flex().items_center().child(
-                div()
-                    .w_full()
-                    .h(inner_height)
-                    .bg(cx.theme().tokens.background)
-                    .rounded(inner_radius)
-                    .shadow_sm(),
-            ),
-            TabVariant::Pill => el.flex().items_center().child(
-                div()
-                    .size_full()
-                    .bg(cx.theme().tokens.primary)
-                    .rounded(cx.theme().radius_full()),
-            ),
-            TabVariant::Underline => el.child(
-                div()
-                    .absolute()
-                    .left_0()
-                    .right_0()
-                    .bottom_0()
-                    .h(px(2.))
-                    .bg(cx.theme().tokens.primary),
-            ),
-            _ => el,
-        });
-
-        if !self.animated {
-            // Epoch 0 also keeps the tabs from fading their text along with
-            // a slide that is not happening.
-            return Some((indicator.left(to_left).w(to_width).into_any_element(), 0));
-        }
-
-        let indicator = indicator.with_animation(
-            ElementId::NamedInteger("tab-ind".into(), epoch),
-            Animation::new(Duration::from_millis(200)).with_easing(ease_in_out_cubic),
-            move |el, delta| {
-                let left = Lerp::lerp(&from_left, &to_left, delta);
-                let width = Lerp::lerp(&from_width, &to_width, delta);
-                el.left(left).w(width)
-            },
-        );
+        let indicator = div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .left(left + inset)
+            .w(width)
+            .map(|el| match variant {
+                TabVariant::Segmented => el.flex().items_center().child(
+                    div()
+                        .w_full()
+                        .h(inner_height)
+                        .bg(cx.theme().tokens.background)
+                        .rounded(inner_radius)
+                        .shadow(raised_shadow()),
+                ),
+                TabVariant::Pill => el.flex().items_center().child(
+                    div()
+                        .size_full()
+                        .bg(cx.theme().tokens.primary)
+                        .rounded(cx.theme().radius_full()),
+                ),
+                TabVariant::Underline => el.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .bottom_0()
+                        .h(px(2.))
+                        .bg(cx.theme().tokens.primary),
+                ),
+                _ => el,
+            });
 
         Some((indicator.into_any_element(), epoch))
     }
@@ -290,7 +284,7 @@ impl TabBar {
         selected_ix: usize,
         bounds_rc: &Option<Rc<RefCell<TabIndicatorBounds>>>,
         prev_selected: &gpui::Entity<usize>,
-        anim_params: &gpui::Entity<(Pixels, Pixels, Pixels, Pixels, u64)>,
+        anim_params: &gpui::Entity<(Pixels, Pixels, u64)>,
         cx: &mut App,
     ) {
         let rc = match bounds_rc {
@@ -310,25 +304,17 @@ impl TabBar {
         }
 
         if prev_ix != selected_ix {
-            let from_b = bounds.tabs.get(prev_ix);
-            let to_b = bounds.tabs.get(selected_ix);
-            match (from_b, to_b) {
-                (Some(from_b), Some(to_b)) => {
-                    let from_left = from_b.origin.x - container.origin.x;
-                    let from_width = from_b.size.width;
-                    let to_left = to_b.origin.x - container.origin.x;
-                    let to_width = to_b.size.width;
-                    let epoch = anim_params.read(cx).4 + 1;
-                    anim_params.update(cx, |v, _| {
-                        *v = (from_left, from_width, to_left, to_width, epoch)
-                    });
-                }
-                (None, Some(to_b)) => {
-                    let left = to_b.origin.x - container.origin.x;
-                    let width = to_b.size.width;
-                    anim_params.update(cx, |v, _| *v = (left, width, left, width, v.4));
-                }
-                _ => {}
+            if let Some(to_b) = bounds.tabs.get(selected_ix) {
+                let left = to_b.origin.x - container.origin.x;
+                let width = to_b.size.width;
+                // Only a switch away from a tab that still exists restarts the
+                // tabs' own epoch-keyed transitions.
+                let epoch = anim_params.read(cx).2;
+                let epoch = match bounds.tabs.get(prev_ix) {
+                    Some(_) => epoch + 1,
+                    None => epoch,
+                };
+                anim_params.update(cx, |v, _| *v = (left, width, epoch));
             }
             drop(bounds);
             prev_selected.update(cx, |v, _| *v = selected_ix);
@@ -338,15 +324,10 @@ impl TabBar {
         if let Some(to_b) = bounds.tabs.get(selected_ix) {
             let left = to_b.origin.x - container.origin.x;
             let width = to_b.size.width;
-            let (_, _, to_left, to_width, epoch) = *anim_params.read(cx);
-
-            if to_width == px(0.) {
-                anim_params.update(cx, |v, _| *v = (left, width, left, width, epoch));
-                return;
-            }
+            let (to_left, to_width, epoch) = *anim_params.read(cx);
 
             if left != to_left || width != to_width {
-                anim_params.update(cx, |v, _| *v = (left, width, left, width, epoch));
+                anim_params.update(cx, |v, _| *v = (left, width, epoch));
             }
         }
     }
@@ -433,7 +414,8 @@ impl RenderOnce for TabBar {
             None
         };
 
-        let indicator = self.render_indicator(&bounds_rc, window, cx);
+        let padding_x = paddings.left;
+        let indicator = self.render_indicator(&bounds_rc, padding_x, window, cx);
         let indicator_epoch = indicator.as_ref().map(|(_, epoch)| *epoch).unwrap_or(0);
         let indicator_element = indicator.map(|(el, _)| el);
         let indicator_ready = indicator_element.is_some();
@@ -508,25 +490,33 @@ impl RenderOnce for TabBar {
             .refine_style(&self.style)
             .when_some(self.prefix, |this, prefix| this.child(prefix))
             .child(
-                h_flex().id("tabs").flex_1().overflow_x_hidden().child(
-                    h_flex()
-                        .id("tabs-inner")
-                        .relative()
-                        .gap(gap)
-                        .overflow_x_scroll()
-                        .lock_scroll_axis()
-                        .when_some(self.scroll_handle, |this, scroll_handle| {
-                            this.track_scroll(&scroll_handle)
-                        })
-                        .when_some(bounds_rc.clone(), |this, rc| {
-                            this.on_prepaint(move |bounds, _, _| {
-                                rc.borrow_mut().container = bounds;
+                h_flex()
+                    .id("tabs")
+                    .flex_1()
+                    .mx(-padding_x)
+                    .px(padding_x)
+                    .overflow_x_hidden()
+                    .child(
+                        h_flex()
+                            .id("tabs-inner")
+                            .mx(-padding_x)
+                            .px(padding_x)
+                            .relative()
+                            .gap(gap)
+                            .overflow_x_scroll()
+                            .lock_scroll_axis()
+                            .when_some(self.scroll_handle, |this, scroll_handle| {
+                                this.track_scroll(&scroll_handle)
                             })
-                        })
-                        .when_some(indicator_element, |this, ind| this.child(ind))
-                        .children(rendered_tabs)
-                        .when(has_suffix_or_menu, |this| this.child(self.last_empty_space)),
-                ),
+                            .when_some(bounds_rc.clone(), |this, rc| {
+                                this.on_prepaint(move |bounds, _, _| {
+                                    rc.borrow_mut().container = bounds;
+                                })
+                            })
+                            .when_some(indicator_element, |this, ind| this.child(ind))
+                            .children(rendered_tabs)
+                            .when(has_suffix_or_menu, |this| this.child(self.last_empty_space)),
+                    ),
             )
             .when(self.menu, |this| {
                 this.child(

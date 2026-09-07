@@ -401,6 +401,19 @@ impl DisplayMap {
         self.wrap_map.wrapper().offset_to_display_point(offset)
     }
 
+    /// Like [`Self::offset_to_wrap_display_point`], but honours the caret's line-end affinity so
+    /// an offset on a soft wrap boundary resolves to the row the caret is drawn on.
+    #[inline]
+    pub(crate) fn offset_to_wrap_display_point_with_affinity(
+        &self,
+        offset: usize,
+        line_end_affinity: bool,
+    ) -> WrapDisplayPoint {
+        self.wrap_map
+            .wrapper()
+            .offset_to_display_point_with_affinity(offset, line_end_affinity)
+    }
+
     /// Convert wrap display point to byte offset.
     #[inline]
     pub(crate) fn wrap_display_point_to_offset(&self, point: WrapDisplayPoint) -> usize {
@@ -430,6 +443,16 @@ impl DisplayMap {
     #[inline]
     pub fn display_row_to_wrap_row(&self, display_row: usize) -> Option<usize> {
         self.fold_map.display_row_to_wrap_row(display_row)
+    }
+
+    pub(crate) fn display_row_column_to_offset(&self, display_row: usize, column: usize) -> usize {
+        let wrap_row = self
+            .fold_map
+            .display_row_to_wrap_row(display_row)
+            .unwrap_or(0);
+        self.wrap_map
+            .wrapper()
+            .display_point_to_offset(WrapDisplayPoint::new(wrap_row, 0, column))
     }
 
     /// Get the longest row index (by byte length).

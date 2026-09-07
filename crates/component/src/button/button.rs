@@ -2,8 +2,8 @@ use std::rc::Rc;
 
 use crate::ThemeStyled as _;
 use crate::{
-    ActiveTheme, Colorize as _, Disableable, Icon, RoleOverride, Selectable, Sizable, Size,
-    StyleSized, StyledExt,
+    ActiveTheme, Colorize as _, Disableable, Icon, Placement, RoleOverride, Selectable, Sizable,
+    Size, StyleSized, StyledExt,
     button::ButtonIcon,
     h_flex,
     select::Caret,
@@ -188,6 +188,8 @@ pub struct Button {
     base: gpui_base::Button,
     icon: Option<ButtonIcon>,
     label: Option<SharedString>,
+    /// The announced name, when the visible content is not it.
+    accessibility_label: Option<SharedString>,
     children: Vec<AnyElement>,
     disabled: bool,
     pub(crate) selected: bool,
@@ -199,12 +201,15 @@ pub struct Button {
     border_corners: Corners<bool>,
     border_edges: Edges<bool>,
     dropdown_caret: bool,
+    hover_group: Option<SharedString>,
+    hover_group_held: bool,
     size: Size,
     compact: bool,
     tooltip: Option<(
         SharedString,
         Option<(Rc<Box<dyn gpui::Action>>, Option<SharedString>)>,
     )>,
+    tooltip_placement: Option<Placement>,
     tooltip_builder: Option<Rc<dyn Fn(&mut Window, &mut App) -> gpui::AnyView>>,
     on_click: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>>,
     on_hover: Option<Rc<dyn Fn(&bool, &mut Window, &mut App)>>,
@@ -231,6 +236,7 @@ impl Button {
             base: gpui_base::Button::new(id),
             icon: None,
             label: None,
+            accessibility_label: None,
             children: Vec::new(),
             disabled: false,
             selected: false,
@@ -247,6 +253,7 @@ impl Button {
             border_edges: Edges::all(true),
             size: Size::Medium,
             tooltip: None,
+            tooltip_placement: None,
             tooltip_builder: None,
             on_click: None,
             focus_ring_enabled: true,
@@ -256,9 +263,17 @@ impl Button {
             outline: false,
             loading_icon: None,
             dropdown_caret: false,
+            hover_group: None,
+            hover_group_held: false,
             tab_index: 0,
             tab_stop: true,
         }
+    }
+
+    /// Uses a behavior primitive supplied by a compound Base control.
+    pub(crate) fn with_base(mut self, base: gpui_base::Button) -> Self {
+        self.base = base;
+        self
     }
 
     pub(super) fn variant(&self) -> ButtonVariant {
@@ -302,6 +317,21 @@ impl Button {
         self
     }
 
+    /// Join a hover group: while any member is hovered, an idle member shows
+    /// its hover surface at half strength, so a composite such as a split
+    /// button reads as one control with the hovered part emphasized.
+    pub(crate) fn hover_group(mut self, group: impl Into<SharedString>) -> Self {
+        self.hover_group = Some(group.into());
+        self
+    }
+
+    /// Keep the hover group's idle surface up without a pointer, for as long as
+    /// the group is held engaged, such as while a sibling's menu is open.
+    pub(crate) fn hover_group_held(mut self, held: bool) -> Self {
+        self.hover_group_held = held;
+        self
+    }
+
     /// Set label to the Button, if no label is set, the button will be in Icon Button mode.
     pub fn label(mut self, label: impl Into<SharedString>) -> Self {
         self.label = Some(label.into());
@@ -314,6 +344,20 @@ impl Button {
         self
     }
 
+    /// Set the name a screen reader announces, when the visible content is not
+    /// it.
+    ///
+    /// A button's name comes from its [`label`](Self::label) by default, which
+    /// is right for the ordinary case and wrong for two: an icon-only button has
+    /// no label to read, and a button whose content is a row of cells — a table
+    /// row that is also a control — would be read out cell by cell with no
+    /// statement of what pressing it does. Setting this replaces the announced
+    /// name without adding anything to the screen.
+    pub fn accessibility_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.accessibility_label = Some(label.into());
+        self
+    }
+
     /// Set the icon of the button, if the Button have no label, the button well in Icon Button mode.
     pub fn icon(mut self, icon: impl Into<ButtonIcon>) -> Self {
         self.icon = Some(icon.into());
@@ -323,6 +367,15 @@ impl Button {
     /// Set the tooltip of the button.
     pub fn tooltip(mut self, tooltip: impl Into<SharedString>) -> Self {
         self.tooltip = Some((tooltip.into(), None));
+        self
+    }
+
+    /// Prefer a side for the tooltip, falling back when it does not fit.
+    ///
+    /// Applies to [`Self::tooltip`] and [`Self::tooltip_with_action`].
+    /// Omitting placement keeps automatic positioning.
+    pub fn tooltip_placement(mut self, placement: Placement) -> Self {
+        self.tooltip_placement = Some(placement);
         self
     }
 
@@ -494,6 +547,9 @@ impl RenderOnce for Button {
         let hoverable = self.hoverable();
         let disabled = self.disabled;
         let loading = self.loading;
+        let tooltip_placement = self.tooltip_placement;
+        let hover_group = self.hover_group;
+        let hover_group_held = self.hover_group_held;
         let mut base = self.base;
         let children = self.children;
         let instance_style = base.style().clone();
@@ -602,14 +658,27 @@ impl RenderOnce for Button {
                                 .border_color(active_style.border)
                                 .text_color(active_style.fg)
                         })
+                        .when_some(hover_group, |this, group| {
+                            let idle_bg = style.hovered(self.outline, cx).bg.opacity(0.5);
+                            this.when(hover_group_held, |this| this.bg(idle_bg))
+                                .group_hover(group, |this| this.bg(idle_bg))
+                        })
                     })
             })
             .refine_style(&instance_style);
 
-        let accessibility_label = self.label.clone();
+        // The explicit name wins: it exists precisely for the cases where the
+        // visible content is not what a listener needs to hear.
+        let accessibility_label = self
+            .accessibility_label
+            .clone()
+            .or_else(|| self.label.clone());
         let content = h_flex()
             .id("label")
             .size_full()
+            .min_w_0()
+            .overflow_hidden()
+            .whitespace_nowrap()
             .items_center()
             .justify_center()
             .button_text_size(self.size)
@@ -626,7 +695,14 @@ impl RenderOnce for Button {
                 )
             })
             .when_some(self.label, |this, label| {
-                this.child(div().flex_none().line_height(relative(1.)).child(label))
+                this.child(
+                    div()
+                        .min_w_0()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .line_height(relative(1.))
+                        .child(label),
+                )
             })
             .children(children)
             .when(self.dropdown_caret, |this| {
@@ -706,6 +782,9 @@ impl RenderOnce for Button {
                 on_click(event, window, cx);
             })
         })
+        .when(loading, |this| {
+            this.on_click(|_, _, cx| cx.stop_propagation())
+        })
         .when_some(self.on_hover.filter(|_| hoverable), |this, on_hover| {
             this.on_hover(move |hovered, window, cx| {
                 on_hover(hovered, window, cx);
@@ -713,9 +792,11 @@ impl RenderOnce for Button {
         })
         .map(|this| {
             if let Some(builder) = self.tooltip_builder {
-                this.managed_tooltip(move |window, cx| builder(window, cx))
+                this.managed_tooltip_with_placement(tooltip_placement, move |window, cx| {
+                    builder(window, cx)
+                })
             } else if let Some((tooltip, action)) = self.tooltip {
-                this.managed_tooltip(move |window, cx| {
+                this.managed_tooltip_with_placement(tooltip_placement, move |window, cx| {
                     Tooltip::new(tooltip.clone())
                         .when_some(action.clone(), |this, (action, context)| {
                             this.action(
@@ -1225,6 +1306,29 @@ mod tests {
     use crate::IconName;
     use gpui::{linear_color_stop, linear_gradient, px};
 
+    /// A button's announced name is its label, unless it was given one — which
+    /// is the case an icon-only button and a row-shaped button both need.
+    #[test]
+    fn an_explicit_accessibility_label_replaces_the_visible_one() {
+        let plain = Button::new("save").label("Save");
+        assert_eq!(plain.accessibility_label, None);
+        assert_eq!(plain.label.as_deref(), Some("Save"));
+
+        let named = Button::new("row")
+            .label("Save")
+            .accessibility_label("Save the current document");
+        assert_eq!(
+            named.accessibility_label.as_deref(),
+            Some("Save the current document"),
+            "an explicit name must win over the visible label"
+        );
+        assert_eq!(
+            named.label.as_deref(),
+            Some("Save"),
+            "and must not change what is drawn"
+        );
+    }
+
     #[gpui::test]
     fn disabled_legacy_button_keeps_existing_pointer_blocking(cx: &mut gpui::TestAppContext) {
         use std::{cell::Cell, rc::Rc};
@@ -1408,6 +1512,54 @@ mod tests {
 
         assert_eq!(parent_clicks.get(), 0);
         cx.update(|window, cx| assert!(window.focused(cx).is_some()));
+    }
+
+    #[gpui::test]
+    fn base_activation_is_preserved_and_blocked_while_loading(cx: &mut gpui::TestAppContext) {
+        use gpui::{Context, Render, point};
+        use std::{cell::Cell, rc::Rc};
+
+        struct Harness {
+            clicks: Rc<Cell<usize>>,
+            loading: bool,
+        }
+        impl Render for Harness {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let clicks = self.clicks.clone();
+                div().tab_group().child(
+                    Button::new("close")
+                        .with_base(
+                            gpui_base::Button::new("close")
+                                .on_click(move |_, _, _| clicks.set(clicks.get() + 1)),
+                        )
+                        .loading(self.loading)
+                        .size(px(100.)),
+                )
+            }
+        }
+
+        cx.update(crate::init);
+        let clicks = Rc::new(Cell::new(0));
+        let (view, cx) = cx.add_window_view({
+            let clicks = clicks.clone();
+            move |_, _| Harness {
+                clicks,
+                loading: false,
+            }
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_click(point(px(10.), px(10.)), Default::default());
+        assert_eq!(clicks.get(), 1);
+
+        view.update(cx, |view, cx| {
+            view.loading = true;
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_click(point(px(10.), px(10.)), Default::default());
+        cx.update(|window, cx| window.focus_next(cx));
+        cx.simulate_keystrokes("enter space");
+        assert_eq!(clicks.get(), 1);
     }
 
     #[gpui::test]

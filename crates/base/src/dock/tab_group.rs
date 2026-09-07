@@ -5,7 +5,7 @@ use std::{rc::Rc, sync::Arc};
 use gpui::{
     AnyElement, AnyView, App, Bounds, Context, Div, DragMoveEvent, Empty, EventEmitter,
     FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
-    Render, Stateful, WeakEntity, Window, div, prelude::FluentBuilder as _,
+    Render, Stateful, Styled as _, WeakEntity, Window, div, prelude::FluentBuilder as _, px,
 };
 
 use crate::Placement;
@@ -128,7 +128,7 @@ impl TabGroupConstraints {
         self.collapsed
     }
 
-    pub fn can_close(&self) -> bool {
+    pub fn is_closable(&self) -> bool {
         self.closable
     }
 }
@@ -220,8 +220,8 @@ impl TabGroup {
     /// Mirrors the old `TabPanel::closable`: the container must permit it, the
     /// group must have somewhere to go, and the displayed panel must itself be
     /// closable.
-    pub fn can_close(&self, cx: &App) -> bool {
-        self.constraints.can_close()
+    pub fn is_closable(&self, cx: &App) -> bool {
+        self.constraints.is_closable()
             && self.draggable(cx)
             && self
                 .active_panel(cx)
@@ -244,7 +244,7 @@ impl TabGroup {
     /// Ask the container to close `panel`. Nothing happens for a panel that is
     /// not in this group, or when either the group or the panel refuses.
     pub fn close_panel(&mut self, panel: PanelId, cx: &mut Context<Self>) {
-        if !self.constraints.can_close() {
+        if !self.constraints.is_closable() {
             return;
         }
         // A dock's last group has nowhere to go and must stay.
@@ -279,7 +279,7 @@ impl TabGroup {
             active_ix: self.active_ix,
             zoomed: self.zoomed,
             collapsed: self.constraints.is_collapsed(),
-            can_close: self.can_close(cx),
+            closable: self.is_closable(cx),
             locked: self.is_locked(),
             draggable: self.draggable(cx),
             droppable: self.droppable(),
@@ -695,12 +695,40 @@ impl Render for TabGroup {
 
         renderer
             .frame(&context, window, cx)
+            // Structure, applied around whatever the renderer returns.
+            //
+            // A column, and not a `div`: gpui's default display is Block, and
+            // in block layout a child's `flex_grow` is ignored -- the content
+            // region below the tab bar resolves to zero height, because its
+            // only descendant is the panel view, positioned absolutely and
+            // contributing no content height. So a renderer that returned a
+            // plain frame got a group that drew its tabs and nothing else, at
+            // whatever width its tabs happened to be.
+            .flex()
+            .flex_col()
+            .size_full()
+            .overflow_hidden()
             .track_focus(&focus_handle)
             .tab_group()
             .child(renderer.render_tab_bar(&context, window, cx))
             .child(
                 renderer
                     .content_frame(&context, window, cx)
+                    // The region below the tab bar takes the rest of the
+                    // group -- except in a collapsed one, which is a strip of
+                    // tabs with no content and must claim no space at all.
+                    .flex()
+                    .flex_col()
+                    .when(!context.is_collapsed(), |this| this.flex_1())
+                    // A flex item's `min-height` is `auto`, so a column that
+                    // grows to fill the group is still floored by the height
+                    // its content wants. A panel holding a virtualized list
+                    // measured itself against every row rather than the region
+                    // it was given: the clip was right, so it looked correct,
+                    // and the list built rows nobody could see. Flooring it at
+                    // zero lets the region win.
+                    .min_h(px(0.))
+                    .overflow_hidden()
                     // Both drag kinds hang off `droppable` alone. The old
                     // `TabPanel` nested a second guard inside the same
                     // droppable test for the host-item handlers, asking
@@ -755,7 +783,7 @@ pub struct TabGroupContext {
     locked: bool,
     draggable: bool,
     droppable: bool,
-    can_close: bool,
+    closable: bool,
     drop_indicator: Option<DropIndicator>,
     on_select_tab: SelectTabHandler,
     on_close: ClosePanelHandler,
@@ -801,8 +829,8 @@ impl TabGroupContext {
 
     /// Whether closing the displayed panel is allowed at all, so a skin knows
     /// whether to offer a Close control.
-    pub fn can_close(&self) -> bool {
-        self.can_close
+    pub fn is_closable(&self) -> bool {
+        self.closable
     }
 
     pub fn is_locked(&self) -> bool {
@@ -875,6 +903,9 @@ pub trait TabGroupRenderer: 'static {
     ///
     /// Identified rather than plain, so a skin can add a role, a tooltip, or
     /// scroll tracking; `Stateful<Div>` does everything base needs from it.
+    /// Appearance only. The group is laid out as a column that fills its slot
+    /// around whatever this returns, because a group that does not is a strip
+    /// of tabs with no content under it.
     fn frame(&self, group: &TabGroupContext, window: &mut Window, cx: &mut App) -> Stateful<Div> {
         div().id("tab-group")
     }
@@ -943,7 +974,7 @@ mod tests {
 
     use gpui::{
         AppContext as _, Entity, Modifiers, MouseButton, StatefulInteractiveElement as _,
-        Styled as _, TestAppContext, VisualTestContext, point, px, size,
+        TestAppContext, VisualTestContext, point, px, size,
     };
 
     use super::*;
@@ -1481,7 +1512,7 @@ mod tests {
         });
         cx.run_until_parked();
 
-        assert!(!cx.update(|_, cx| group.read(cx).context(cx).can_close()));
+        assert!(!cx.update(|_, cx| group.read(cx).context(cx).is_closable()));
         assert!(events.borrow().is_empty());
     }
 
@@ -1500,14 +1531,14 @@ mod tests {
                 group.set_constraints(TabGroupConstraints::in_split(true), window, cx)
             })
         });
-        let alone = cx.update(|_, cx| group.read(cx).context(cx).can_close());
+        let alone = cx.update(|_, cx| group.read(cx).context(cx).is_closable());
 
         cx.update(|window, cx| {
             group.update(cx, |group, cx| {
                 group.set_constraints(TabGroupConstraints::in_split(false), window, cx)
             })
         });
-        let beside_a_sibling = cx.update(|_, cx| group.read(cx).context(cx).can_close());
+        let beside_a_sibling = cx.update(|_, cx| group.read(cx).context(cx).is_closable());
 
         assert!(!alone);
         assert!(beside_a_sibling);

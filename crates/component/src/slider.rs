@@ -1,10 +1,8 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
-use crate::{ActiveTheme, AxisExt, StyledExt, ThemeStyled as _, animation::ease_out_cubic};
+use crate::{ActiveTheme, AxisExt, StyledExt, ThemeStyled as _};
 pub use gpui_base::slider::{SliderEvent, SliderScale, SliderState, SliderValue};
-use gpui_base::{
-    Slider as BaseSlider, SliderIndicator, SliderThumb, SliderTrack, Transition, transition,
-};
+use gpui_base::{Slider as BaseSlider, SliderIndicator, SliderThumb, SliderTrack, spring};
 
 use gpui::{
     App, Axis, Background, Corners, DefiniteLength, ElementId, Entity, EntityId, Hsla,
@@ -17,9 +15,6 @@ use gpui::{
 const THUMB_RING_WIDTH: Pixels = px(3.);
 /// Opacity of the fully grown thumb ring.
 const THUMB_RING_OPACITY: f32 = 0.5;
-/// Duration of the thumb ring grow/shrink animation.
-const THUMB_RING_DURATION: Duration = Duration::from_millis(150);
-
 /// The animated hover ring of one thumb.
 struct ThumbRing {
     interaction: Entity<ThumbInteraction>,
@@ -53,14 +48,14 @@ impl ThumbRing {
             cx,
             |_, _| ThumbInteraction::default(),
         );
-        let progress = transition(
+        let progress = spring(
             (("slider-thumb-ring", id), channel),
             if interaction.read(cx).is_active() {
                 1.
             } else {
                 0.
             },
-            Transition::new(THUMB_RING_DURATION).ease(ease_out_cubic),
+            cx.theme().motion_tokens().spring_control,
             window,
             cx,
         );

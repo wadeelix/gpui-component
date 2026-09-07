@@ -154,6 +154,12 @@ impl RenderOnce for ResizablePanelGroup {
         container
             .id(self.id)
             .size_full()
+            // The group only distributes space along its own axis, so a caller
+            // supplied size can only mean the cross axis.
+            .when_some(self.size, |this, size| match self.axis {
+                Axis::Horizontal => this.h(size),
+                Axis::Vertical => this.w(size),
+            })
             .children(
                 self.children
                     .into_iter()
@@ -168,7 +174,7 @@ impl RenderOnce for ResizablePanelGroup {
             )
             .on_prepaint({
                 let state = state.clone();
-                move |bounds, _, cx| {
+                move |bounds, window, cx| {
                     state.update(cx, |state, cx| {
                         let size_changed =
                             state.bounds.size.along(self.axis) != bounds.size.along(self.axis);
@@ -177,6 +183,18 @@ impl RenderOnce for ResizablePanelGroup {
 
                         if size_changed {
                             state.adjust_to_container_size(cx);
+                            // The adjustment lands after this frame's layout has
+                            // already been computed, and a notify raised during a
+                            // draw only records the view as dirty without scheduling
+                            // a frame for it. Defer the notify so it runs once the
+                            // draw has finished and can schedule the settling frame.
+                            // Otherwise that frame stays pending until some later
+                            // input repaints the window, and the divider appears to
+                            // jump on hover.
+                            let state = cx.entity();
+                            window.defer(cx, move |_, cx| {
+                                state.update(cx, |_, cx| cx.notify());
+                            });
                         }
                     })
                 }

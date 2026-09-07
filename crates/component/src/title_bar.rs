@@ -70,8 +70,9 @@ impl TitleBar {
     /// [`crate::TitleBar`], so the title bar owns dragging and double clicking itself:
     ///
     /// ```no_run
-    /// # use gpui::WindowOptions;
-    /// # use gpui_component::TitleBar;
+    /// # mod gpui_kit { pub use gpui::*; pub extern crate gpui_component as component; }
+    /// # use gpui_kit::WindowOptions;
+    /// # use gpui_kit::component::TitleBar;
     /// let options = WindowOptions {
     ///     window_min_size: None,
     ///     ..TitleBar::window_options()

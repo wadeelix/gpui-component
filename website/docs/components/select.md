@@ -22,7 +22,7 @@ For richer selection UIs with custom trigger rendering or multi-select, see [Com
 ## Import
 
 ```rust
-use gpui_component::select::{
+use gpui_kit::component::select::{
     Select, SelectState, SelectItem, SelectDelegate,
     SelectEvent, SearchableVec, SelectGroup
 };
@@ -67,6 +67,21 @@ Select::new(&state)
     .placeholder("Select a language...")
 ```
 
+### Accessibility
+
+Give the control a name that stays the same when the selection changes:
+
+```rust
+Select::new(&state)
+    .accessibility_label("Programming language")
+    .placeholder("Choose a language")
+```
+
+The accessible value uses the committed item's `title()` and any `title_prefix`.
+A custom `display_title()` remains visual presentation. Searching does not change
+that committed value. With no selection, the accessible value uses the placeholder.
+Enabled controls expose accessible activation to open or close the popup.
+
 ### Searchable
 
 Use `searchable(true)` to enable search functionality within the dropdown.
@@ -106,7 +121,7 @@ impl SelectItem for Country {
         self.name.clone()
     }
 
-    fn display_title(&self) -> Option<gpui::AnyElement> {
+    fn display_title(&self) -> Option<gpui_kit::AnyElement> {
         // Custom display for selected item
         Some(format!("{} ({})", self.name, self.code).into_any_element())
     }
@@ -281,7 +296,7 @@ impl SelectItem for Region {
         self.name.clone()
     }
 
-    fn display_title(&self) -> Option<gpui::AnyElement> {
+    fn display_title(&self) -> Option<gpui_kit::AnyElement> {
         Some(
             h_flex()
                 .items_center()

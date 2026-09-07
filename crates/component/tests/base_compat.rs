@@ -45,6 +45,18 @@ fn base_crate_exports_the_same_foundation_types() {
 }
 
 #[test]
+fn motion_core_types_are_available_from_the_base_facade() {
+    let timing = gpui_base::Timing::new(std::time::Duration::from_millis(100))
+        .ease(gpui_base::Easing::Linear);
+    assert_eq!(
+        timing
+            .sample(std::time::Duration::from_millis(50))
+            .directed_progress,
+        0.5
+    );
+}
+
+#[test]
 fn base_avatar_uses_application_owned_image_and_fallback_slots() {
     let _ = gpui_base::Avatar::new()
         .image(gpui_base::AvatarImage::new(gpui::ImageSource::from(
@@ -372,28 +384,8 @@ fn element_ext_is_available_from_base_and_the_legacy_root() {
 
 #[test]
 fn legacy_history_path_reexports_the_base_type() {
-    #[derive(Clone, PartialEq)]
-    struct Item {
-        version: usize,
-    }
-
-    impl gpui_base::HistoryItem for Item {
-        fn version(&self) -> usize {
-            self.version
-        }
-
-        fn set_version(&mut self, version: usize) {
-            self.version = version;
-        }
-    }
-
-    fn through_legacy_path(
-        history: gpui_base::History<Item>,
-    ) -> gpui_component::history::History<Item> {
-        history
-    }
-
-    let _ = through_legacy_path(gpui_base::History::new());
+    let _: gpui_component::history::History<u8> = gpui_base::History::new();
+    let _: gpui_component::history::UndoHistory<u8> = gpui_base::UndoHistory::new();
 }
 
 #[test]

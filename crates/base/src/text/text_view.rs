@@ -1,23 +1,73 @@
-use std::sync::Arc;
+use std::{ops::Range, sync::Arc};
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, Bounds, ClickEvent, Element, ElementId, Entity, GlobalElementId, Hitbox,
-    HitboxBehavior, InspectorElementId, InteractiveElement, IntoElement, LayoutId, MouseButton,
-    ParentElement, Pixels, SharedString, StyleRefinement, Styled, Window, div,
+    AnyElement, App, Bounds, ClickEvent, ContentMask, Element, ElementId, Entity, Global,
+    GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, InteractiveElement, IntoElement,
+    LayoutId, MouseButton, ParentElement, Pixels, Refineable as _, SharedString, StyleRefinement,
+    Styled, Window, div, point, px,
 };
 
 use crate::StyledExt;
-use crate::scroll::ScrollableElement;
 use crate::text::TextViewFormat;
 use crate::text::markdown_ext::{MarkdownExtensions, MarkdownNode, MarkdownPlugin};
 use crate::text::node::{CodeBlock, TableData};
-use crate::text::state::{SelectionFormat, TextViewState};
-use crate::{global_state::UiGlobalState, text::TextViewStyle};
+use crate::text::state::{LineSpan, SelectionFormat, TextViewState};
+use crate::{GlobalState, TextSelection, text::TextViewStyle};
 
 /// Type for code block actions generator function.
 pub(crate) type CodeBlockActionsFn =
     dyn Fn(&CodeBlock, &mut Window, &mut App) -> AnyElement + Send + Sync;
+
+pub(crate) type CodeBlockHighlighterFn =
+    dyn Fn(&CodeBlock) -> Vec<(Range<usize>, gpui::HighlightStyle)> + Send + Sync;
+
+/// Application-wide defaults for TextViews that do not provide explicit
+/// presentation or syntax-highlighting overrides.
+#[derive(Clone, Default)]
+pub struct TextViewDefaults {
+    style: Option<TextViewStyle>,
+    code_block_highlighter: Option<Arc<CodeBlockHighlighterFn>>,
+}
+
+impl Global for TextViewDefaults {}
+
+impl TextViewDefaults {
+    /// Creates defaults that leave every text view as Base renders it.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the style every text view starts from.
+    pub fn with_style(mut self, style: TextViewStyle) -> Self {
+        self.style = Some(style);
+        self
+    }
+
+    /// Sets the syntax highlighter used for fenced code blocks.
+    pub fn with_code_block_highlighter<F>(mut self, highlighter: F) -> Self
+    where
+        F: Fn(&CodeBlock) -> Vec<(Range<usize>, gpui::HighlightStyle)> + Send + Sync + 'static,
+    {
+        self.code_block_highlighter = Some(Arc::new(highlighter));
+        self
+    }
+
+    /// Installs these defaults for the whole application.
+    pub fn install(self, cx: &mut App) {
+        cx.set_global(self);
+    }
+
+    /// Returns the installed defaults, or the Base ones when none were.
+    pub fn global(cx: &App) -> Self {
+        cx.try_global::<Self>().cloned().unwrap_or_default()
+    }
+
+    /// Whether a syntax highlighter was installed.
+    pub fn has_code_block_highlighter(&self) -> bool {
+        self.code_block_highlighter.is_some()
+    }
+}
 
 /// Type for the table actions generator function.
 pub(crate) type TableActionsFn =
@@ -68,12 +118,14 @@ pub struct TextView {
     format: Option<TextViewFormat>,
     text: Option<SharedString>,
     pub(crate) state: Option<Entity<TextViewState>>,
-    text_view_style: TextViewStyle,
+    text_view_style: Option<TextViewStyle>,
     style: StyleRefinement,
     selectable: bool,
     selection_format: SelectionFormat,
     scrollable: bool,
+    max_lines: Option<usize>,
     code_block_actions: Option<Arc<CodeBlockActionsFn>>,
+    code_block_highlighter: Option<Arc<CodeBlockHighlighterFn>>,
     table_actions: Option<Arc<TableActionsFn>>,
     link_click_handler: Option<Arc<LinkClickHandlerFn>>,
     markdown_extensions: Arc<MarkdownExtensions>,
@@ -110,12 +162,14 @@ impl TextView {
             state: Some(state.clone()),
             format: None,
             text: None,
-            text_view_style: TextViewStyle::default(),
+            text_view_style: None,
             style: StyleRefinement::default(),
-            selectable: false,
+            selectable: true,
             selection_format: SelectionFormat::default(),
             scrollable: false,
+            max_lines: None,
             code_block_actions: None,
+            code_block_highlighter: None,
             table_actions: None,
             link_click_handler: None,
             markdown_extensions: Arc::default(),
@@ -128,13 +182,15 @@ impl TextView {
             id: id.into(),
             format: Some(TextViewFormat::Markdown),
             text: Some(markdown.into()),
-            text_view_style: TextViewStyle::default(),
+            text_view_style: None,
             style: StyleRefinement::default(),
             state: None,
-            selectable: false,
+            selectable: true,
             selection_format: SelectionFormat::default(),
             scrollable: false,
+            max_lines: None,
             code_block_actions: None,
+            code_block_highlighter: None,
             table_actions: None,
             link_click_handler: None,
             markdown_extensions: Arc::default(),
@@ -147,13 +203,15 @@ impl TextView {
             id: id.into(),
             format: Some(TextViewFormat::Html),
             text: Some(html.into()),
-            text_view_style: TextViewStyle::default(),
+            text_view_style: None,
             style: StyleRefinement::default(),
             state: None,
-            selectable: false,
+            selectable: true,
             selection_format: SelectionFormat::default(),
             scrollable: false,
+            max_lines: None,
             code_block_actions: None,
+            code_block_highlighter: None,
             table_actions: None,
             link_click_handler: None,
             markdown_extensions: Arc::default(),
@@ -162,11 +220,11 @@ impl TextView {
 
     /// Set [`TextViewStyle`].
     pub fn style(mut self, style: TextViewStyle) -> Self {
-        self.text_view_style = style;
+        self.text_view_style = Some(style);
         self
     }
 
-    /// Set the text view to be selectable, default is false.
+    /// Set whether the text view is selectable, default is true.
     pub fn selectable(mut self, selectable: bool) -> Self {
         self.selectable = selectable;
         self
@@ -198,6 +256,29 @@ impl TextView {
         self
     }
 
+    /// Clamp the rendered content to at most `n` lines of body text.
+    ///
+    /// The view's height is capped at `n` × the base line height, and a line
+    /// of glyphs is never cut in half: a line that would straddle the bottom
+    /// of the box is left out whole, across paragraphs, lists, headings, code
+    /// blocks and tables. Nothing is shown with less than a line of itself to
+    /// show, so the border and padding a table row leads with never strands at
+    /// the bottom; whatever has more than that is cut on the box edge and keeps
+    /// the part that fits, rather than disappearing and leaving blank space
+    /// behind.
+    ///
+    /// Check [`TextViewState::is_clamped`] (which answers for the frame that
+    /// was last painted) to decide whether to show an "expand" affordance.
+    ///
+    /// `n` counts lines of body text, so paragraph spacing and taller lines
+    /// mean fewer of them fit inside the capped height. A line taller than the
+    /// whole budget keeps the part that fits rather than emptying the box.
+    /// Ignored when [`Self::scrollable`] is set.
+    pub fn max_lines(mut self, max_lines: usize) -> Self {
+        self.max_lines = Some(max_lines);
+        self
+    }
+
     /// Set custom block actions for code blocks.
     ///
     /// The closure receives the [`CodeBlock`],
@@ -210,6 +291,18 @@ impl TextView {
         self.code_block_actions = Some(Arc::new(move |code_block, window, cx| {
             f(&code_block, window, cx).into_any_element()
         }));
+        self
+    }
+
+    /// Adds opt-in syntax highlighting for fenced code blocks.
+    ///
+    /// Returned byte ranges are relative to [`CodeBlock::code`]. Invalid
+    /// ranges are discarded. Without this callback, code is unhighlighted.
+    pub fn code_block_highlighter<F>(mut self, highlighter: F) -> Self
+    where
+        F: Fn(&CodeBlock) -> Vec<(Range<usize>, gpui::HighlightStyle)> + Send + Sync + 'static,
+    {
+        self.code_block_highlighter = Some(Arc::new(highlighter));
         self
     }
 
@@ -311,9 +404,99 @@ pub struct TextViewLayoutState {
     element: AnyElement,
 }
 
+pub struct TextViewPrepaintState {
+    hitbox: Hitbox,
+    /// Where paint has to pull the `max_lines` clip up to, because a glyph line
+    /// straddles the bottom of the box. `None` leaves the clip at the box edge,
+    /// where the container's hidden overflow already applies it.
+    clip_bottom: Option<Pixels>,
+}
+
+/// Absorbs sub-pixel layout jitter: a line ending within a pixel of the box
+/// bottom counts as fitting inside it.
+const CLIP_EPSILON: Pixels = px(1.);
+
+/// The bottom of the last whole line at or above `y`, with the height of a line
+/// where it sits.
+fn last_line_bottom_above(spans: &[LineSpan], y: Pixels) -> Option<(Pixels, Pixels)> {
+    let mut last: Option<(Pixels, Pixels)> = None;
+    let mut keep = |bottom: Pixels, line_height: Pixels| {
+        if bottom <= y + CLIP_EPSILON && last.is_none_or(|(last, _)| bottom > last) {
+            last = Some((bottom, line_height));
+        }
+    };
+
+    for span in spans {
+        if span.line_height <= px(0.) {
+            continue;
+        }
+        let mut bottom = span.top + span.line_height;
+        while bottom <= span.bottom + CLIP_EPSILON {
+            keep(bottom, span.line_height);
+            bottom += span.line_height;
+        }
+        // The span's own bottom covers a last line taller than the rest.
+        keep(span.bottom, span.line_height);
+    }
+
+    last
+}
+
+/// Where to clip, given the lines a descendant `Inline` reported. `None` leaves
+/// the clip on the box edge.
+///
+/// Two things are never shown: half a line of glyphs, and anything with less
+/// than a line of itself to show. A line straddling `box_bottom` is left out
+/// whole, and so is the strip between it and the line before — the border and
+/// padding a table row leads with reads as a rendering fault rather than as a
+/// row. Whatever has more than a line to show is cut on the edge and keeps the
+/// part that fits, so the box holds no blank space it could have filled.
+fn line_safe_clip_bottom(
+    spans: &[LineSpan],
+    box_bottom: Pixels,
+    content_bottom: Pixels,
+) -> Option<Pixels> {
+    let mut clip = box_bottom;
+
+    for span in spans {
+        if span.line_height <= px(0.)
+            || span.top >= box_bottom
+            || span.bottom <= box_bottom + CLIP_EPSILON
+        {
+            continue;
+        }
+        let whole_lines = ((box_bottom - span.top) / span.line_height).floor();
+        let line_top = span.top + span.line_height * whole_lines;
+        // A line starting on the box edge is not straddling it.
+        if line_top < box_bottom - CLIP_EPSILON {
+            clip = clip.min(line_top);
+        }
+    }
+
+    let Some((last_line_bottom, line_height)) = last_line_bottom_above(spans, clip) else {
+        // Leaving the straddling line out would leave nothing at all — a first
+        // line taller than the whole budget, a heading in a one-line box. It
+        // keeps the part that fits instead, because an empty clamp reads as
+        // broken where a cut one reads as more to come.
+        return None;
+    };
+
+    // Snap away a scrap. Only content that continues past the box can leave
+    // one: the space under the last line of a document that fits is the box's
+    // own, not a piece of something below.
+    if content_bottom > box_bottom + CLIP_EPSILON {
+        let strip = clip - last_line_bottom;
+        if strip > CLIP_EPSILON && strip < line_height {
+            clip = last_line_bottom;
+        }
+    }
+
+    (clip < box_bottom - CLIP_EPSILON).then_some(clip)
+}
+
 impl Element for TextView {
     type RequestLayoutState = TextViewLayoutState;
-    type PrepaintState = Hitbox;
+    type PrepaintState = TextViewPrepaintState;
 
     fn id(&self) -> Option<ElementId> {
         Some(self.id.clone())
@@ -351,18 +534,35 @@ impl Element for TextView {
             state
         };
 
+        // `max_lines` needs the whole document laid out to snap the clip to a
+        // whole line, so it only applies to the fit-content mode.
+        let max_lines = self.max_lines.filter(|_| !self.scrollable);
+
+        let defaults = TextViewDefaults::global(cx);
+        let text_view_style = self
+            .text_view_style
+            .clone()
+            .or(defaults.style)
+            .unwrap_or_else(|| TextViewStyle::from_theme(&crate::Theme::global(cx)));
+        let code_block_highlighter = self
+            .code_block_highlighter
+            .clone()
+            .or(defaults.code_block_highlighter);
+
         state.update(cx, |state, cx| {
             state.code_block_actions = self.code_block_actions.clone();
+            state.code_block_highlighter = code_block_highlighter.clone();
             state.table_actions = self.table_actions.clone();
             state.link_click_handler = self.link_click_handler.clone();
             state.set_markdown_extensions(self.markdown_extensions.clone(), cx);
             state.selectable = self.selectable;
             state.selection_format = self.selection_format;
             state.scrollable = self.scrollable;
-            if state.text_view_style != self.text_view_style {
+            state.max_lines = max_lines;
+            if state.text_view_style != text_view_style {
                 state.selection_revision = state.selection_revision.wrapping_add(1);
             }
-            state.text_view_style = self.text_view_style.clone();
+            state.text_view_style = text_view_style.clone();
 
             if let Some(text) = self.text.clone() {
                 state.set_text(text.as_str(), cx);
@@ -371,8 +571,17 @@ impl Element for TextView {
 
         let focus_handle = state.read(cx).focus_handle.clone();
         let list_state = state.read(cx).list_state.clone();
+        // Cap the box at `n` body-text lines (the effective text style may be
+        // refined by this view's own style, e.g. `.text_sm()`); hidden
+        // overflow also clips descendant hitboxes to the box during prepaint.
+        let max_lines_cap = max_lines.map(|max_lines| {
+            let mut text_style = window.text_style();
+            text_style.refine(&self.style.text);
+            text_style.line_height_in_pixels(window.rem_size()) * max_lines as f32
+        });
 
         let mut el = div()
+            .id(("text-view-scroll", state.entity_id()))
             .key_context("TextView")
             .track_focus(&focus_handle)
             .when(self.scrollable, |this| {
@@ -386,13 +595,12 @@ impl Element for TextView {
                     // margin it keeps from the edge. 10px left the bar sitting
                     // on a full-width table outright and 18px still grazed it.
                     .pr(gpui::px(24.))
-                    .vertical_scrollbar(&list_state)
             })
+            .when_some(max_lines_cap, |this, cap| this.max_h(cap).overflow_hidden())
             .relative()
+            .text_color(text_view_style.foreground())
             .on_action(move |_: &crate::input::Copy, window, cx| {
-                let text = gpui_base::TextSelection::selected_text(window, cx)
-                    .trim()
-                    .to_string();
+                let text = TextSelection::selected_text(window, cx).trim().to_string();
                 if text.is_empty() {
                     cx.propagate();
                     return;
@@ -401,6 +609,17 @@ impl Element for TextView {
             })
             .on_action(window.listener_for(&state, TextViewState::on_action_select_all))
             .child(state.clone())
+            // Overlay controls must paint after the document, otherwise rich
+            // content and selection backgrounds cover the thumb and hitbox.
+            .when(self.scrollable, |this| {
+                this.child(
+                    div().absolute().inset_0().child(
+                        crate::Scrollbar::vertical(&list_state)
+                            .id(("text-view-scrollbar", state.entity_id()))
+                            .viewport_from_layout(),
+                    ),
+                )
+            })
             .refine_style(&self.style)
             .into_any_element();
         let layout_id = el.request_layout(window, cx);
@@ -416,17 +635,66 @@ impl Element for TextView {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
+        let state = request_layout.state.clone();
+        let max_lines_active = state.read(cx).max_lines.is_some();
+        if max_lines_active {
+            if let Ok(mut line_spans) = state.read(cx).line_spans.lock() {
+                line_spans.clear();
+            }
+            // Descendant `Inline`s report their line spans through the state
+            // stack during prepaint (in addition to the paint-time push below).
+            GlobalState::global_mut(cx)
+                .text_view_state_stack
+                .push(state.clone());
+        }
         request_layout.element.prepaint(window, cx);
-        window.insert_hitbox(bounds, HitboxBehavior::Normal)
+        if max_lines_active {
+            GlobalState::global_mut(cx).text_view_state_stack.pop();
+        }
+
+        let mut clip_bottom = None;
+        if max_lines_active {
+            let (line_spans, content_bottom) = {
+                let state = state.read(cx);
+                (
+                    state
+                        .line_spans
+                        .lock()
+                        .map(|spans| spans.clone())
+                        .unwrap_or_default(),
+                    state.bounds().bottom(),
+                )
+            };
+            // The content keeps its natural height inside the capped box, so
+            // this sees everything the box cannot show — including a tall image
+            // that reports no lines of its own.
+            let clipped = content_bottom > bounds.bottom() + px(1.);
+            // Notify on change so observers (e.g. an "expand" button gated on
+            // `is_clamped`) re-render once the flag flips.
+            if state.read(cx).clamped != clipped {
+                state.update(cx, |state, cx| {
+                    state.clamped = clipped;
+                    cx.notify();
+                });
+            }
+            if clipped {
+                clip_bottom = line_safe_clip_bottom(&line_spans, bounds.bottom(), content_bottom);
+            }
+        }
+
+        TextViewPrepaintState {
+            hitbox: window.insert_hitbox(bounds, HitboxBehavior::Normal),
+            clip_bottom,
+        }
     }
 
     fn paint(
         &mut self,
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
-        _bounds: Bounds<Pixels>,
+        bounds: Bounds<Pixels>,
         request_layout: &mut Self::RequestLayoutState,
-        hitbox: &mut Self::PrepaintState,
+        prepaint: &mut Self::PrepaintState,
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -435,11 +703,22 @@ impl Element for TextView {
             state.update(cx, |state, _| state.selection_adapter.begin_frame());
         }
 
-        UiGlobalState::global_mut(cx)
+        GlobalState::global_mut(cx)
             .text_view_state_stack
             .push(state.clone());
-        request_layout.element.paint(window, cx);
-        UiGlobalState::global_mut(cx).text_view_state_stack.pop();
+        if let Some(clip_bottom) = prepaint.clip_bottom {
+            // Snap the `max_lines` clip to the last whole line that fits, so a
+            // line of glyphs is never cut in half.
+            let mask = ContentMask {
+                bounds: Bounds::from_corners(bounds.origin, point(bounds.right(), clip_bottom)),
+            };
+            window.with_content_mask(Some(mask), |window| {
+                request_layout.element.paint(window, cx);
+            });
+        } else {
+            request_layout.element.paint(window, cx);
+        }
+        GlobalState::global_mut(cx).text_view_state_stack.pop();
 
         if self.selectable {
             let (adapter, scroll_offset, content_bounds) = {
@@ -450,9 +729,9 @@ impl Element for TextView {
                     state.bounds(),
                 )
             };
-            let document_order = UiGlobalState::global_mut(cx).next_selection_document_order();
+            let document_order = GlobalState::global_mut(cx).next_selection_document_order();
             adapter.register(
-                hitbox.clone(),
+                prepaint.hitbox.clone(),
                 content_bounds,
                 scroll_offset,
                 document_order,
@@ -465,17 +744,122 @@ impl Element for TextView {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
     use super::{TextView, TextViewPlugin};
     use crate::text::{TableData, TextViewState, TextViewStyle};
     use gpui::{
         AppContext as _, Bounds, ClickEvent, Context, Entity, InteractiveElement as _, IntoElement,
         Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Overflow, ParentElement as _, Pixels,
-        Render, SharedString, StyleRefinement, Styled as _, TestAppContext, VisualTestContext,
-        Window, div, point, px,
+        Render, SharedString, StatefulInteractiveElement as _, StyleRefinement, Styled as _,
+        TestAppContext, VisualTestContext, Window, div, point, px,
     };
 
     struct TextViewTestRoot {
         text_view: Entity<TextViewState>,
+    }
+
+    /// A scrollable viewport, so the list has a bounded height to measure
+    /// against and `max_offset_for_scrollbar` reports a real scroll extent.
+    struct ScrollExtentTestRoot {
+        text_view: Entity<TextViewState>,
+    }
+
+    impl Render for ScrollExtentTestRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(px(400.))
+                .h(px(200.))
+                .overflow_hidden()
+                .child(TextView::new(&self.text_view).scrollable(true))
+        }
+    }
+
+    /// `count` paragraphs, each `words` words long, so two documents can share
+    /// a block count while differing wildly in height.
+    fn document_of(count: usize, words: usize) -> String {
+        (1..=count)
+            .map(|i| format!("Block {i}: {}", "lorem ipsum dolor ".repeat(words)))
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
+    /// Replacing a document with one that happens to have the *same* block
+    /// count must still re-measure. `Document::render_root` only resets the
+    /// list when the count changes, so without an explicit re-measure every
+    /// cached height stays with the previous document and the scroll extent
+    /// keeps describing it.
+    #[gpui::test]
+    fn replacing_a_document_with_an_equal_block_count_remeasures(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+
+        const BLOCKS: usize = 24;
+        let short = document_of(BLOCKS, 1);
+        let tall = document_of(BLOCKS, 60);
+
+        let (root, cx) = cx.add_window_view(|_, cx| ScrollExtentTestRoot {
+            text_view: cx.new(|cx| TextViewState::markdown(&short, cx)),
+        });
+        let cx: &mut VisualTestContext = cx;
+
+        // The list is populated and measured during layout, so every
+        // assertion below has to follow a real frame.
+        let settle = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            cx.run_until_parked();
+        };
+        settle(cx);
+
+        let scroll_extent = |cx: &mut VisualTestContext| {
+            root.read_with(cx, |root, cx| {
+                root.text_view
+                    .read(cx)
+                    .list_state()
+                    .max_offset_for_scrollbar()
+                    .y
+            })
+        };
+
+        let short_extent = scroll_extent(cx);
+
+        root.update(cx, |root, cx| {
+            root.text_view
+                .update(cx, |state, cx| state.set_text(&tall, cx));
+        });
+        settle(cx);
+
+        root.read_with(cx, |root, cx| {
+            assert_eq!(
+                root.text_view.read(cx).list_state().item_count(),
+                BLOCKS,
+                "the replacement must keep the block count, or the list resets and the bug cannot occur"
+            );
+        });
+
+        let tall_extent = scroll_extent(cx);
+        assert!(
+            tall_extent > short_extent * 5.,
+            "a much taller document must grow the scroll extent, but it went from \
+             {short_extent:?} to {tall_extent:?}"
+        );
+    }
+
+    struct StatelessMarkdownRoot {
+        renders: Arc<AtomicUsize>,
+    }
+
+    impl Render for StatelessMarkdownRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            self.renders.fetch_add(1, Ordering::Relaxed);
+            div().child(
+                TextView::markdown("stateless-markdown", include_str!("../../../../README.md"))
+                    .markdown_block_parser(|_, _| None),
+            )
+        }
     }
 
     struct DummyTextViewPlugin;
@@ -485,6 +869,53 @@ mod tests {
             text_view.selectable = true;
             text_view
         }
+    }
+
+    #[gpui::test]
+    fn text_view_constructors_are_selectable_by_default(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let state = cx.update(|cx| cx.new(|cx| TextViewState::markdown("state", cx)));
+
+        assert!(TextView::new(&state).selectable);
+        assert!(TextView::markdown("markdown", "text").selectable);
+        assert!(TextView::html("html", "<p>text</p>").selectable);
+    }
+
+    #[gpui::test]
+    fn stateless_markdown_with_rebuilt_parser_settles(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let renders = Arc::new(AtomicUsize::new(0));
+        let (_, cx) = cx.add_window_view({
+            let renders = renders.clone();
+            move |_, _| StatelessMarkdownRoot { renders }
+        });
+        let cx: &mut VisualTestContext = cx;
+
+        cx.run_until_parked();
+        assert!(
+            renders.load(Ordering::Relaxed) <= 2,
+            "an unchanged TextView must settle after its parse, but rendered {} times",
+            renders.load(Ordering::Relaxed),
+        );
+    }
+
+    #[gpui::test]
+    fn unstyled_text_view_uses_base_tokens_for_link_and_input_selection(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        cx.update(|cx| {
+            let colors = &mut crate::Theme::global_mut(cx).tokens.colors;
+            colors.primary = gpui::rgb(0x55aaff).into();
+            colors.selection = gpui::rgb(0x335577).into();
+        });
+        let (root, cx) = cx.add_window_view(|_, cx| TextViewTestRoot::new("[link](url)", cx));
+        let cx: &mut VisualTestContext = cx;
+
+        cx.run_until_parked();
+        root.read_with(cx, |root, cx| {
+            let style = &root.text_view.read(cx).text_view_style;
+            assert_eq!(style.link(), gpui::rgb(0x55aaff).into());
+            assert_eq!(style.selection(), gpui::rgb(0x335577).into());
+        });
     }
 
     impl TextViewTestRoot {
@@ -507,6 +938,51 @@ mod tests {
                 )
                 .child(div().h(px(40.)).child("footer"))
         }
+    }
+
+    struct TableSelectionTestRoot {
+        text_view: Entity<TextViewState>,
+    }
+
+    impl Render for TableSelectionTestRoot {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .debug_selector(|| "table-selection-root".into())
+                .w(px(520.))
+                .child(crate::TextSelectionLayer)
+                .child(TextView::new(&self.text_view))
+        }
+    }
+
+    #[gpui::test]
+    fn table_drag_selection_settles_without_requesting_idle_frames(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let (_, cx) = cx.add_window_view(|_, cx| TableSelectionTestRoot {
+            text_view: cx.new(|cx| {
+                TextViewState::markdown(
+                    "| Header 1 | Header 2 |\n| --- | --- |\n| Cell A | Cell B |\n| Cell C | Cell D |",
+                    cx,
+                )
+            }),
+        });
+        let cx: &mut VisualTestContext = cx;
+
+        cx.run_until_parked();
+        let bounds = cx
+            .debug_bounds("table-selection-root")
+            .expect("table bounds");
+        let start = point(bounds.left() + px(24.), bounds.top() + px(16.));
+        let end = point(bounds.right() - px(24.), bounds.bottom() - px(16.));
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+
+        assert!(cx.update(|window, cx| crate::TextSelection::has_selection(window, cx)));
+        assert_eq!(
+            cx.update(|window, cx| window.simulate_next_frame(cx)),
+            0,
+            "finished table selection must not continuously request frames"
+        );
     }
 
     struct InlineImageTextViewTestRoot {
@@ -536,16 +1012,7 @@ mod tests {
     #[gpui::test]
     fn inline_image_keeps_surrounding_text_on_same_line(cx: &mut TestAppContext) {
         cx.update(crate::init);
-        let (root, cx) = cx.add_window_view(|window, cx| {
-            let content = cx.new(|cx| InlineImageTextViewTestRoot::new(cx));
-            crate::Root::new(content, window, cx)
-        });
-        let content = root.read_with(cx, |root, _| {
-            root.view()
-                .clone()
-                .downcast::<InlineImageTextViewTestRoot>()
-                .unwrap()
-        });
+        let (content, cx) = cx.add_window_view(|_, cx| InlineImageTextViewTestRoot::new(cx));
         let cx: &mut VisualTestContext = cx;
 
         cx.run_until_parked();
@@ -674,7 +1141,7 @@ mod tests {
                         "table-actions",
                         "| Name | Age |\n|:--|--:|\n| Alice | 30 |\n| Bob | 41 |",
                     )
-                    .style(TextViewStyle::default().table(table_style))
+                    .style(TextViewStyle::default().with_table(table_style))
                     .table_actions(move |table, _, _| {
                         if let Ok(mut captured) = captured.lock() {
                             captured.push(table.clone());
@@ -739,6 +1206,23 @@ mod tests {
         assert!(view.selectable);
     }
 
+    #[test]
+    fn syntax_highlighting_is_opt_in() {
+        let default_view = TextView::markdown("default-code", "```rust\nfn main() {}\n```");
+        assert!(default_view.code_block_highlighter.is_none());
+
+        let view = default_view.code_block_highlighter(|block| {
+            vec![(
+                0..block.code().len(),
+                gpui::HighlightStyle {
+                    color: Some(gpui::rgb(0x3366ff).into()),
+                    ..Default::default()
+                },
+            )]
+        });
+        assert!(view.code_block_highlighter.is_some());
+    }
+
     #[gpui::test]
     fn clipped_markdown_link_does_not_open(cx: &mut TestAppContext) {
         cx.update(crate::init);
@@ -748,6 +1232,221 @@ mod tests {
         let cx: &mut VisualTestContext = cx;
 
         cx.simulate_click(point(px(10.), px(34.)), Modifiers::default());
+
+        assert_eq!(cx.opened_url(), None);
+    }
+
+    struct MaxLinesTestRoot {
+        text_view: Entity<TextViewState>,
+        max_lines: usize,
+    }
+
+    impl MaxLinesTestRoot {
+        fn new(text: &str, max_lines: usize, cx: &mut Context<Self>) -> Self {
+            let text_view = cx.new(|cx| TextViewState::markdown(text, cx));
+            Self {
+                text_view,
+                max_lines,
+            }
+        }
+    }
+
+    impl Render for MaxLinesTestRoot {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(px(200.))
+                .child(TextView::new(&self.text_view).max_lines(self.max_lines))
+        }
+    }
+
+    #[test]
+    fn the_clip_only_moves_for_a_straddling_glyph_line() {
+        use super::line_safe_clip_bottom;
+        use crate::text::state::LineSpan;
+
+        let spans = [
+            // Lines end at 20 / 40 / 60.
+            LineSpan {
+                top: px(0.),
+                bottom: px(60.),
+                line_height: px(20.),
+            },
+            // A second block after an 8px gap; lines end at 88 / 108 / 128.
+            LineSpan {
+                top: px(68.),
+                bottom: px(128.),
+                line_height: px(20.),
+            },
+        ];
+
+        // Content continues well past the box in every case but the last.
+        let below = px(400.);
+
+        // A box ending inside the line 88..108 leaves that line out whole.
+        assert_eq!(
+            line_safe_clip_bottom(&spans, px(100.), below),
+            Some(px(88.))
+        );
+
+        // A box ending on a line boundary has nothing to pull the clip up for.
+        assert_eq!(line_safe_clip_bottom(&spans, px(88.), below), None);
+
+        // A strip below the last line shorter than a line — the border and
+        // padding a block leads with — is not worth showing.
+        assert_eq!(line_safe_clip_bottom(&spans, px(64.), below), Some(px(60.)));
+
+        // One taller than a line is: whatever crosses the edge keeps the part
+        // that fits rather than leaving the box half empty.
+        let one_block = [LineSpan {
+            top: px(0.),
+            bottom: px(60.),
+            line_height: px(20.),
+        }];
+        assert_eq!(line_safe_clip_bottom(&one_block, px(200.), below), None);
+
+        // Nothing crosses the edge at all: the space under the last line is
+        // the box's own, not a scrap of something below.
+        assert_eq!(line_safe_clip_bottom(&spans, px(130.), px(128.)), None);
+    }
+
+    #[test]
+    fn a_line_taller_than_the_budget_keeps_the_part_that_fits() {
+        use super::line_safe_clip_bottom;
+        use crate::text::state::LineSpan;
+
+        // A heading line of 28px, in a box capped at one 26px body line.
+        let heading = [LineSpan {
+            top: px(70.),
+            bottom: px(98.),
+            line_height: px(28.),
+        }];
+
+        assert_eq!(line_safe_clip_bottom(&heading, px(96.), px(400.)), None);
+    }
+
+    #[test]
+    fn the_clip_does_not_stop_on_a_row_of_border_and_padding() {
+        use super::line_safe_clip_bottom;
+        use crate::text::state::LineSpan;
+
+        // Two table rows, each one line of text, 9px of border and padding
+        // between them.
+        let rows = [
+            LineSpan {
+                top: px(100.),
+                bottom: px(126.),
+                line_height: px(26.),
+            },
+            LineSpan {
+                top: px(135.),
+                bottom: px(161.),
+                line_height: px(26.),
+            },
+        ];
+
+        // Leaving out the second row's text would strand the 9px it leads
+        // with, so the clip goes back to the row above it.
+        assert_eq!(
+            line_safe_clip_bottom(&rows, px(148.), px(400.)),
+            Some(px(126.))
+        );
+    }
+
+    /// A clamped view nested the way an application nests one: inside a card,
+    /// inside a region that fills a window of a known height. The height an
+    /// ancestor hands down must not reach the clamped content and hide the
+    /// overflow the clamp measures — with the content stretched to the capped
+    /// box, nothing looks clipped and lines get cut in half.
+    struct ClampedPageRoot {
+        text_view: Entity<TextViewState>,
+        max_lines: usize,
+    }
+
+    impl Render for ClampedPageRoot {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            use crate::{h_flex, v_flex};
+
+            v_flex()
+                .size_full()
+                .p_4()
+                .gap_4()
+                .child(h_flex().max_w(px(480.)).gap_3().child("header"))
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_h_0()
+                        .gap_4()
+                        .id("clamped-page-scroll")
+                        .child(
+                            v_flex()
+                                .max_w(px(480.))
+                                .p_3()
+                                .gap_2()
+                                .child(TextView::new(&self.text_view).max_lines(self.max_lines)),
+                        )
+                        .overflow_y_scroll(),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn max_lines_measures_overflow_inside_a_sized_page(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let (root, cx) = cx.add_window_view(|_, cx| {
+            let text_view = cx.new(|cx| {
+                TextViewState::markdown(
+                    "first\n\nsecond\n\nthird\n\nfourth\n\nfifth\n\nsixth\n\nseventh",
+                    cx,
+                )
+            });
+            ClampedPageRoot {
+                text_view,
+                max_lines: 3,
+            }
+        });
+        let cx: &mut VisualTestContext = cx;
+
+        assert!(root.read_with(cx, |root, cx| root.text_view.read(cx).is_clamped()));
+    }
+
+    #[gpui::test]
+    fn max_lines_clamps_overflowing_content(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let (root, cx) = cx.add_window_view(|_, cx| {
+            MaxLinesTestRoot::new(
+                "first\n\nsecond\n\nthird\n\nfourth\n\nfifth\n\nsixth",
+                2,
+                cx,
+            )
+        });
+        let cx: &mut VisualTestContext = cx;
+
+        assert!(root.read_with(cx, |root, cx| root.text_view.read(cx).is_clamped()));
+    }
+
+    #[gpui::test]
+    fn max_lines_leaves_short_content_unclamped(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let (root, cx) = cx.add_window_view(|_, cx| MaxLinesTestRoot::new("only line", 3, cx));
+        let cx: &mut VisualTestContext = cx;
+
+        assert!(!root.read_with(cx, |root, cx| root.text_view.read(cx).is_clamped()));
+    }
+
+    #[gpui::test]
+    fn max_lines_disables_links_hidden_by_the_clamp(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let (_, cx) = cx.add_window_view(|_, cx| {
+            MaxLinesTestRoot::new(
+                "first\n\nsecond\n\nthird\n\n[hidden](https://example.com)",
+                2,
+                cx,
+            )
+        });
+        let cx: &mut VisualTestContext = cx;
+
+        // Click far below the clamped box, where the link would sit unclamped.
+        cx.simulate_click(point(px(10.), px(150.)), Modifiers::default());
 
         assert_eq!(cx.opened_url(), None);
     }
@@ -883,8 +1582,7 @@ mod tests {
         cx.update(crate::init);
         let clicks = Arc::new(Mutex::new(Vec::new()));
         let captured = clicks.clone();
-        let (root, cx) = cx.add_window_view(move |window, cx| {
-            let content = cx.new(|cx| LinkedImageRoot {
+        let (content, cx) = cx.add_window_view(move |_, cx| LinkedImageRoot {
                 text_view: cx.new(|cx| {
                     TextViewState::markdown(
                         r#"Before [<img src="https://example.com/image.svg" width="32" height="32">](https://example.com/image-link) after."#,
@@ -892,12 +1590,8 @@ mod tests {
                     )
                 }),
                 clicks,
-            });
-            crate::Root::new(content, window, cx)
-        });
-        let content = root.read_with(cx, |root, _| {
-            root.view().clone().downcast::<LinkedImageRoot>().unwrap()
-        });
+            }
+        );
         let cx: &mut VisualTestContext = cx;
         cx.run_until_parked();
         cx.update(|window, cx| {
@@ -989,6 +1683,7 @@ mod tests {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
             div()
                 .w(px(200.))
+                .child(crate::TextSelectionLayer)
                 .child(
                     div()
                         .h(px(40.))
@@ -1012,16 +1707,7 @@ mod tests {
     #[gpui::test]
     fn selection_band_beyond_clip_copies_offscreen_text(cx: &mut TestAppContext) {
         cx.update(crate::init);
-        let (view, cx) = cx.add_window_view(|window, cx| {
-            let content = cx.new(ClippedTallTextViewTestRoot::new);
-            crate::Root::new(content, window, cx)
-        });
-        let content = view.read_with(cx, |root, _| {
-            root.view()
-                .clone()
-                .downcast::<ClippedTallTextViewTestRoot>()
-                .unwrap()
-        });
+        let (content, cx) = cx.add_window_view(|_, cx| ClippedTallTextViewTestRoot::new(cx));
         let cx: &mut VisualTestContext = cx;
 
         cx.run_until_parked();

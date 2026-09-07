@@ -4,6 +4,7 @@ use gpui::{Context, Pixels, Point, Window};
 use crate::input::{
     InputBaseState, MoveDown, MoveEnd, MoveHome, MoveLeft, MovePageDown, MovePageUp, MoveRight,
     MoveToEnd, MoveToNextWord, MoveToPreviousWord, MoveToStart, MoveUp, RopeExt as _,
+    cursor::CursorSelection,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -13,18 +14,43 @@ pub(crate) enum MoveDirection {
 }
 
 impl<M: InputModeKind> InputBaseState<M> {
-    /// Called after moving the cursor. Updates preferred_column if we know where the cursor now is.
-    pub(super) fn update_preferred_column(&mut self) {
-        self.preferred_column = self.preferred_column_at(self.cursor());
+    /// Compute the column anchor for the given `offset`. Wrap/fold-aware.
+    pub(super) fn preferred_column_for(&self, offset: usize) -> Option<(Pixels, usize)> {
+        self.preferred_column_for_with_affinity(offset, false)
     }
 
-    /// The x and column of `offset` on the last frame, if it was drawn.
-    fn preferred_column_at(&self, offset: usize) -> Option<(Pixels, usize)> {
+    /// Like [`Self::preferred_column_for`], but resolves an offset on a soft wrap
+    /// boundary to the row the caret is drawn on.
+    fn preferred_column_for_with_affinity(
+        &self,
+        offset: usize,
+        line_end_affinity: bool,
+    ) -> Option<(Pixels, usize)> {
         let last_layout = self.last_layout.as_ref()?;
         let point = self.text.offset_to_point(offset);
         let line = last_layout.line(point.row)?;
-        let pos = line.position_for_index(point.column, last_layout, false)?;
+        let pos = line.position_for_index(point.column, last_layout, line_end_affinity)?;
         Some((pos.x, point.column))
+    }
+
+    /// The line-end affinity that applies to `sel`. Only the active cursor
+    /// carries one; every other cursor sits at the start of its row.
+    pub(super) fn line_end_affinity_for(&self, sel: &CursorSelection) -> bool {
+        sel.id == self.active_selection().id && self.cursor_line_end_affinity
+    }
+
+    /// The line-end affinity for a cursor known only by its offset. Cursors never share an
+    /// offset, so this is the active cursor's affinity when `offset` is where it sits.
+    pub(super) fn line_end_affinity_at(&self, offset: usize) -> bool {
+        offset == self.cursor() && self.cursor_line_end_affinity
+    }
+
+    /// Called after moving the cursor. Updates the active selection's
+    /// `column_anchor` if we know where the cursor now is.
+    pub(super) fn update_preferred_column(&mut self) {
+        let anchor =
+            self.preferred_column_for_with_affinity(self.cursor(), self.cursor_line_end_affinity);
+        self.active_selection_mut().column_anchor = anchor;
     }
 
     /// Move the cursor to the given offset.
@@ -38,10 +64,28 @@ impl<M: InputModeKind> InputBaseState<M> {
         direction: Option<MoveDirection>,
         cx: &mut Context<Self>,
     ) {
+        self.move_to_with_affinity(offset, direction, false, cx);
+    }
+
+    /// Like [`Self::move_to`], but also carries the caret's line-end affinity.
+    ///
+    /// A soft wrap boundary is one offset shared by the end of one visual line and the start of
+    /// the next, so the offset alone cannot say where to draw the caret. Callers that resolved
+    /// the offset from a visual position -- a click, a drag, a vertical move -- already know
+    /// which of the two rows the user meant, and pass it here. Taking it in the same call as the
+    /// move is what keeps the two from drifting apart.
+    pub(crate) fn move_to_with_affinity(
+        &mut self,
+        offset: usize,
+        direction: Option<MoveDirection>,
+        line_end_affinity: bool,
+        cx: &mut Context<Self>,
+    ) {
         self.undo_manager.break_transaction_coalescing();
+        self.selections.remove_all_but_active();
         let offset = offset.clamp(0, self.text.len());
-        self.cursor_line_end_affinity = false;
-        self.selected_range = (offset..offset).into();
+        self.cursor_line_end_affinity = line_end_affinity;
+        self.set_cursor_to(offset);
         self.scroll_to(offset, direction, cx);
         self.pause_blink_cursor(cx);
         self.update_preferred_column();
@@ -50,22 +94,25 @@ impl<M: InputModeKind> InputBaseState<M> {
         cx.notify()
     }
 
-    /// The offset `move_lines` rows from `offset`, at the preferred x when
-    /// there is one: what Up, Down and their selecting forms land on.
+    /// Compute the target offset when moving a cursor at `offset` vertically by
+    /// `move_lines`, honoring the remembered `column_anchor`. Wrap/fold-aware.
     ///
-    /// A table row is one wrap row of several text rows: inside a cell the
-    /// caret moves by text row, and leaves the table row only from the
-    /// cell's first or last one (Word). Otherwise it moves by display row;
-    /// Up into a table row lands on its last text row, as it would on the
-    /// last wrap row of prose.
-    fn vertical_offset(
+    /// Returns the new offset together with the line-end affinity the caret
+    /// should carry there.
+    pub(super) fn vertical_target(
         &self,
         offset: usize,
+        column_anchor: Option<(Pixels, usize)>,
+        line_end_affinity: bool,
         move_lines: isize,
-        preferred: Option<(Pixels, usize)>,
-    ) -> Option<usize> {
-        let last_layout = self.last_layout.as_ref()?;
+    ) -> (usize, bool) {
+        let Some(last_layout) = &self.last_layout else {
+            return (offset, line_end_affinity);
+        };
 
+        // A table row is one wrap row of several text rows: inside a cell the
+        // caret moves by text row, and leaves the table row only from the
+        // cell's first or last one. Otherwise it moves by display row.
         if move_lines.abs() == 1 {
             let point = self.text.offset_to_point(offset);
             let line_start = self.text.line_start_offset(point.row);
@@ -73,16 +120,20 @@ impl<M: InputModeKind> InputBaseState<M> {
                 line.table.as_ref()?.step_text_row(
                     offset.checked_sub(line_start)?,
                     move_lines < 0,
-                    preferred.map(|(x, _)| x),
-                    self.cursor_line_end_affinity,
+                    column_anchor.map(|(x, _)| x),
+                    line_end_affinity,
                 )
             });
             if let Some(local) = inside {
-                return Some(line_start + local);
+                return (line_start + local, false);
             }
         }
 
-        let mut display_point = self.display_map.offset_to_wrap_display_point(offset);
+        // Start from the row the caret is drawn on, not the row the raw offset falls in: on a
+        // soft wrap boundary those are two different rows.
+        let mut display_point = self
+            .display_map
+            .offset_to_wrap_display_point_with_affinity(offset, line_end_affinity);
 
         // Convert wrap row → display row (skips folded rows), move, then convert back
         let current_display_row = self
@@ -127,7 +178,8 @@ impl<M: InputModeKind> InputBaseState<M> {
         display_point.column = 0;
         let mut new_offset = self.display_map.wrap_display_point_to_offset(display_point);
 
-        if let Some((preferred_x, column)) = preferred {
+        let mut new_affinity = false;
+        if let Some((preferred_x, column)) = column_anchor {
             // Get display point again to update local_row.
             let mut next_display_point = self.display_map.offset_to_wrap_display_point(new_offset);
             next_display_point.column = 0;
@@ -144,10 +196,17 @@ impl<M: InputModeKind> InputBaseState<M> {
                     }
                     _ => next_display_point.local_row * last_layout.line_height,
                 };
-                if let Some(x) =
-                    line.closest_index_for_position(Point { x: preferred_x, y }, last_layout)
-                {
+                if let Some((x, line_end_affinity)) = line.closest_index_for_position(
+                    Point {
+                        x: preferred_x,
+                        y,
+                    },
+                    last_layout,
+                ) {
                     new_offset = line_start_offset + x;
+                    // Landing on a wrap boundary means the preferred column pointed past the
+                    // last glyph of the target row, so the caret stays on that row.
+                    new_affinity = line_end_affinity;
                 }
             } else {
                 // Not in visible range, use column directly.
@@ -155,80 +214,146 @@ impl<M: InputModeKind> InputBaseState<M> {
                 new_offset = line_start_offset + column.min(max_line_len);
             }
         }
-        Some(new_offset)
+
+        (new_offset, new_affinity)
     }
 
-    /// Move the cursor vertically by one line (up or down) while preserving the column if possible.
+    /// Move every cursor through `f`, which maps each selection to a
+    /// `(new_offset, column_anchor, line_end_affinity)`, collapsing each to a
+    /// cursor. Overlapping cursors are merged, then the standard post-move
+    /// sequence runs. Only the active cursor's affinity is kept, see
+    /// [`Self::move_to_with_affinity`].
+    pub(super) fn move_all_cursors(
+        &mut self,
+        f: impl Fn(&Self, &CursorSelection) -> (usize, Option<(Pixels, usize)>, bool),
+        direction: Option<MoveDirection>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.undo_manager.break_transaction_coalescing();
+        let len = self.text.len();
+        let mut active_affinity = false;
+        let new_selections: Vec<CursorSelection> = self
+            .selections
+            .iter()
+            .map(|sel| {
+                let (offset, anchor, line_end_affinity) = f(self, sel);
+                if sel.id == self.active_selection().id {
+                    active_affinity = line_end_affinity;
+                }
+                let mut new_sel = *sel;
+                new_sel.place_at(offset.clamp(0, len), anchor);
+                new_sel
+            })
+            .collect();
+        self.selections.replace_all(new_selections);
+        self.selections.merge_overlapping();
+
+        self.cursor_line_end_affinity = active_affinity;
+        self.scroll_to(self.cursor(), direction, cx);
+        self.pause_blink_cursor(cx);
+        M::hide_context_menu(self, cx);
+        M::clear_inline_completion(self, cx);
+        cx.notify();
+    }
+
+    /// Move every cursor vertically by `move_lines`.
     ///
-    /// move_lines: Number of lines to move vertically (positive for down, negative for up).
-    pub(super) fn move_vertical(
+    /// When `collapse` is set, a non-empty selection first collapses to just
+    /// outside its start (up) or end (down) before moving, otherwise the cursor
+    /// offset is used.
+    fn move_vertical(
         &mut self,
         move_lines: isize,
-        _: &mut Window,
+        collapse: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.is_single_line() {
             return;
         }
-        let was_preferred_column = self.preferred_column;
-        let Some(new_offset) =
-            self.vertical_offset(self.cursor(), move_lines, was_preferred_column)
-        else {
-            return;
-        };
-
         self.pause_blink_cursor(cx);
+
         let direction = if move_lines < 0 {
             MoveDirection::Up
         } else {
             MoveDirection::Down
         };
-        self.move_to(new_offset, Some(direction), cx);
-        // Keep the preferred column across repeated presses; without one,
-        // the one `move_to` just took from the new position stands.
-        if was_preferred_column.is_some() {
-            self.preferred_column = was_preferred_column;
-        }
-        cx.notify();
+
+        self.move_all_cursors(
+            move |s, sel| {
+                let (effective, anchor, affinity) = if sel.is_empty() || !collapse {
+                    (
+                        sel.cursor_offset(),
+                        sel.column_anchor,
+                        s.line_end_affinity_for(sel),
+                    )
+                } else if move_lines < 0 {
+                    let e = s.previous_boundary(sel.start.saturating_sub(1));
+                    (e, s.preferred_column_for(e), false)
+                } else {
+                    let e = s.next_boundary(sel.end.saturating_sub(1));
+                    (e, s.preferred_column_for(e), false)
+                };
+                let (offset, affinity) = s.vertical_target(effective, anchor, affinity, move_lines);
+                (offset, anchor, affinity)
+            },
+            Some(direction),
+            window,
+            cx,
+        );
     }
 
-    /// Extend the selection one row up or down from its head, at the head's
-    /// x, the anchor staying: Shift+Up and Shift+Down as every editor has
-    /// them. Inside a table cell the head moves by text row.
-    pub(super) fn select_vertical(&mut self, move_lines: isize, cx: &mut Context<Self>) {
-        if self.is_single_line() {
+    pub(super) fn left(&mut self, _: &MoveLeft, window: &mut Window, cx: &mut Context<Self>) {
+        // With a lone cursor at the very start there is nowhere to move.
+        // Propagate the keystroke so an ancestor (e.g. a navigable command
+        // palette) can act on it. This is harmless when nothing is bound there.
+        // With multiple cursors the others can still move, so only the
+        // single-cursor case propagates.
+        if self.selections.is_single() && self.active_selection().is_empty() && self.cursor() == 0 {
+            cx.propagate();
             return;
         }
-        let head = self.cursor();
-        let preferred = self
-            .preferred_column
-            .or_else(|| self.preferred_column_at(head));
-        let Some(new_offset) = self.vertical_offset(head, move_lines, preferred) else {
+
+        self.move_all_cursors(
+            |s, sel| {
+                let offset = if sel.is_empty() {
+                    s.previous_boundary(sel.cursor_offset())
+                } else {
+                    sel.start
+                };
+                (offset, s.preferred_column_for(offset), false)
+            },
+            None,
+            window,
+            cx,
+        );
+    }
+
+    pub(super) fn right(&mut self, _: &MoveRight, window: &mut Window, cx: &mut Context<Self>) {
+        // Mirror `left`: a lone cursor at the end of the text has nowhere to
+        // move, so let the keystroke bubble to an ancestor.
+        if self.selections.is_single()
+            && self.active_selection().is_empty()
+            && self.cursor() == self.text.len()
+        {
+            cx.propagate();
             return;
-        };
-        self.undo_manager.break_transaction_coalescing();
-        self.pause_blink_cursor(cx);
-        self.select_to(new_offset, cx);
-        self.preferred_column = preferred;
-        cx.notify();
-    }
-
-    pub(super) fn left(&mut self, _: &MoveLeft, _: &mut Window, cx: &mut Context<Self>) {
-        self.pause_blink_cursor(cx);
-        if self.selected_range.is_empty() {
-            self.move_to(self.previous_boundary(self.cursor()), None, cx);
-        } else {
-            self.move_to(self.selected_range.start, None, cx)
         }
-    }
 
-    pub(super) fn right(&mut self, _: &MoveRight, _: &mut Window, cx: &mut Context<Self>) {
-        self.pause_blink_cursor(cx);
-        if self.selected_range.is_empty() {
-            self.move_to(self.next_boundary(self.selected_range.end), None, cx);
-        } else {
-            self.move_to(self.selected_range.end, None, cx)
-        }
+        self.move_all_cursors(
+            |s, sel| {
+                let offset = if sel.is_empty() {
+                    s.next_boundary(sel.cursor_offset())
+                } else {
+                    sel.end
+                };
+                (offset, s.preferred_column_for(offset), false)
+            },
+            None,
+            window,
+            cx,
+        );
     }
 
     pub(super) fn up(&mut self, action: &MoveUp, window: &mut Window, cx: &mut Context<Self>) {
@@ -236,19 +361,7 @@ impl<M: InputModeKind> InputBaseState<M> {
             return;
         }
 
-        if self.is_single_line() {
-            return;
-        }
-
-        if !self.selected_range.is_empty() {
-            self.move_to(
-                self.previous_boundary(self.selected_range.start.saturating_sub(1)),
-                Some(MoveDirection::Up),
-                cx,
-            );
-        }
-        self.pause_blink_cursor(cx);
-        self.move_vertical(-1, window, cx);
+        self.move_vertical(-1, true, window, cx);
     }
 
     pub(super) fn down(&mut self, action: &MoveDown, window: &mut Window, cx: &mut Context<Self>) {
@@ -256,20 +369,7 @@ impl<M: InputModeKind> InputBaseState<M> {
             return;
         }
 
-        if self.is_single_line() {
-            return;
-        }
-
-        if !self.selected_range.is_empty() {
-            self.move_to(
-                self.next_boundary(self.selected_range.end.saturating_sub(1)),
-                Some(MoveDirection::Down),
-                cx,
-            );
-        }
-
-        self.pause_blink_cursor(cx);
-        self.move_vertical(1, window, cx);
+        self.move_vertical(1, true, window, cx);
     }
 
     pub(super) fn page_up(&mut self, _: &MovePageUp, window: &mut Window, cx: &mut Context<Self>) {
@@ -282,7 +382,7 @@ impl<M: InputModeKind> InputBaseState<M> {
         };
 
         let display_lines = (self.input_bounds.size.height / last_layout.line_height) as isize;
-        self.move_vertical(-display_lines, window, cx);
+        self.move_vertical(-display_lines, false, window, cx);
     }
 
     pub(super) fn page_down(
@@ -300,20 +400,32 @@ impl<M: InputModeKind> InputBaseState<M> {
         };
 
         let display_lines = (self.input_bounds.size.height / last_layout.line_height) as isize;
-        self.move_vertical(display_lines, window, cx);
+        self.move_vertical(display_lines, false, window, cx);
     }
 
-    pub(super) fn home(&mut self, _: &MoveHome, _: &mut Window, cx: &mut Context<Self>) {
-        self.pause_blink_cursor(cx);
-        let offset = self.start_of_line();
-        self.move_to(offset, Some(MoveDirection::Up), cx);
+    pub(super) fn home(&mut self, _: &MoveHome, window: &mut Window, cx: &mut Context<Self>) {
+        self.move_all_cursors(
+            |s, sel| {
+                let offset = s.start_of_line_at(sel.cursor_offset(), s.line_end_affinity_for(sel));
+                (offset, s.preferred_column_for(offset), false)
+            },
+            Some(MoveDirection::Up),
+            window,
+            cx,
+        );
     }
 
-    pub(super) fn end(&mut self, _: &MoveEnd, _: &mut Window, cx: &mut Context<Self>) {
-        self.pause_blink_cursor(cx);
-        let offset = self.end_of_line();
-        self.move_to(offset, Some(MoveDirection::Down), cx);
-        self.cursor_line_end_affinity = true;
+    pub(super) fn end(&mut self, _: &MoveEnd, window: &mut Window, cx: &mut Context<Self>) {
+        self.move_all_cursors(
+            |s, sel| {
+                let offset = s.end_of_line_at(sel.cursor_offset(), s.line_end_affinity_for(sel));
+                // The caret belongs at the end of the visual row it is on.
+                (offset, s.preferred_column_for(offset), true)
+            },
+            Some(MoveDirection::Down),
+            window,
+            cx,
+        );
     }
 
     pub(super) fn move_to_start(
@@ -332,20 +444,34 @@ impl<M: InputModeKind> InputBaseState<M> {
     pub(super) fn move_to_previous_word(
         &mut self,
         _: &MoveToPreviousWord,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let offset = self.previous_start_of_word();
-        self.move_to(offset, None, cx);
+        self.move_all_cursors(
+            |s, sel| {
+                let offset = s.previous_start_of_word_at(sel.cursor_offset());
+                (offset, s.preferred_column_for(offset), false)
+            },
+            None,
+            window,
+            cx,
+        );
     }
 
     pub(super) fn move_to_next_word(
         &mut self,
         _: &MoveToNextWord,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let offset = self.next_end_of_word();
-        self.move_to(offset, None, cx);
+        self.move_all_cursors(
+            |s, sel| {
+                let offset = s.next_end_of_word_at(sel.cursor_offset());
+                (offset, s.preferred_column_for(offset), false)
+            },
+            None,
+            window,
+            cx,
+        );
     }
 }

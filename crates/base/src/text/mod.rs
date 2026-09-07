@@ -10,12 +10,10 @@ mod state;
 mod style;
 mod text_view;
 mod utils;
-#[cfg(test)]
-mod window_selection;
 
 use gpui::{App, ElementId, IntoElement, RenderOnce, SharedString, Window};
 pub use markdown_ext::*;
-pub use node::TableData;
+pub use node::{CodeBlock, TableData};
 pub use state::*;
 pub use style::*;
 pub use text_view::*;
@@ -80,7 +78,8 @@ impl Text {
     }
 
     /// Get the text content.
-    pub(crate) fn get_text(&self, cx: &App) -> SharedString {
+    #[doc(hidden)]
+    pub fn get_text(&self, cx: &App) -> SharedString {
         match self {
             Self::String(s) => s.clone(),
             Self::TextView(view) => {

@@ -1,5 +1,6 @@
 ---
 title: 组件
+description: 浏览 60 多个面向生产环境的 Rust UI 组件，覆盖表单、导航、数据、反馈与桌面应用布局。
 order: 2
 collapsed: false
 ---
@@ -10,12 +11,17 @@ collapsed: false
 
 - [Accordion](accordion) - 折叠内容面板
 - [Alert](alert) - 多种变体的提示消息
+- [Attachment](attachment) - 文件与媒体附件表面
 - [Avatar](avatar) - 用户头像与回退文本
 - [Badge](badge) - 徽标与数量指示器
+- [Bubble](bubble) - 支持对齐与 reaction 的聊天消息表面
 - [Button](button) - 支持多种样式的按钮
 - [Checkbox](checkbox) - 二元选择控件
 - [Icon](icon) - 图标展示组件
 - [Image](image) - 带回退能力的图片展示
+- [Marker](marker) - 会话状态与分隔标记
+- [Message](message) - 可组合的聊天消息结构
+- [MessageScroller](message-scroller) - 支持尾部跟随的虚拟消息列表
 - [TextView](text-view) - Markdown 与 HTML 文本渲染
 - [Tooltip](tooltip) - 悬浮提示
 
@@ -51,4 +57,4 @@ collapsed: false
 
 组件页已经预置中文路由结构，尚未完成的页面会先显示中文占位说明，并回链到英文原文：
 
-- [English version](/docs/components/index)
+- [English version](/docs/components)
