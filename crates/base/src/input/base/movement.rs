@@ -196,13 +196,9 @@ impl<M: InputModeKind> InputBaseState<M> {
                     }
                     _ => next_display_point.local_row * last_layout.line_height,
                 };
-                if let Some((x, line_end_affinity)) = line.closest_index_for_position(
-                    Point {
-                        x: preferred_x,
-                        y,
-                    },
-                    last_layout,
-                ) {
+                if let Some((x, line_end_affinity)) =
+                    line.closest_index_for_position(Point { x: preferred_x, y }, last_layout)
+                {
                     new_offset = line_start_offset + x;
                     // Landing on a wrap boundary means the preferred column pointed past the
                     // last glyph of the target row, so the caret stays on that row.

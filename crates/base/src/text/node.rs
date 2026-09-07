@@ -8,10 +8,10 @@ use std::{
 
 use gpui::{
     AnyElement, App, DefiniteLength, Div, ElementId, FontStyle, FontWeight, HighlightStyle, Hsla,
-    Image, ImageFormat, InteractiveElement as _, IntoElement, ObjectFit, Overflow,
-    ParentElement, Pixels, ScrollHandle, SharedString, SharedUri, StatefulInteractiveElement,
-    StyleRefinement, Styled, StyledImage as _, WhiteSpace, Window, div, img,
-    prelude::FluentBuilder as _, px, relative, rems,
+    Image, ImageFormat, InteractiveElement as _, IntoElement, ObjectFit, Overflow, ParentElement,
+    Pixels, ScrollHandle, SharedString, SharedUri, StatefulInteractiveElement, StyleRefinement,
+    Styled, StyledImage as _, WhiteSpace, Window, div, img, prelude::FluentBuilder as _, px,
+    relative, rems,
 };
 use markdown::mdast;
 
