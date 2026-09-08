@@ -926,6 +926,9 @@ pub(crate) struct LineLayout {
     /// Set when this line is a table row laid out per cell; every geometry
     /// question is then answered by it.
     pub(crate) table: Option<Box<crate::input::table_layout::TableRowLayout>>,
+    /// The slab this line sits on, if the application asked for one: painted
+    /// across the text area rather than behind the glyphs.
+    pub(crate) decoration: Option<crate::input::LineDecoration>,
     /// Whether any run of this line carries a background color, so [`Self::paint_background`]
     /// can skip the glyph walk for the common case of a line without highlights.
     has_background: bool,
@@ -944,7 +947,58 @@ impl LineLayout {
             whitespace_chars: Vec::new(),
             whitespace_indicators: None,
             table: None,
+            decoration: None,
             has_background: false,
+        }
+    }
+
+    /// Sets the slab this line sits on.
+    pub(crate) fn with_decoration(
+        mut self,
+        decoration: Option<crate::input::LineDecoration>,
+    ) -> Self {
+        self.decoration = decoration;
+        self
+    }
+
+    /// Paints the line's slab and its left rule, if it has one.
+    ///
+    /// Painted in the same pass as a table's background -- under the
+    /// selection and the text -- so a selection inside a quote stays visible.
+    /// `width` is the text area's, so the slab reaches past the end of a short
+    /// line the way a block-level box does.
+    pub(crate) fn paint_decoration(
+        &self,
+        pos: Point<Pixels>,
+        width: Pixels,
+        line_height: Pixels,
+        window: &mut Window,
+    ) {
+        let Some(decoration) = self.decoration else {
+            return;
+        };
+        let height = self.size(line_height).height;
+        if let Some(background) = decoration.background {
+            let mut quad = gpui::fill(
+                gpui::Bounds::new(pos, gpui::size(width, height)),
+                background,
+            );
+            // Only the block's outer corners are rounded, so its lines stack
+            // into one shape.
+            let radius = px(4.);
+            quad.corner_radii = gpui::Corners {
+                top_left: if decoration.first { radius } else { px(0.) },
+                top_right: if decoration.first { radius } else { px(0.) },
+                bottom_left: if decoration.last { radius } else { px(0.) },
+                bottom_right: if decoration.last { radius } else { px(0.) },
+            };
+            window.paint_quad(quad);
+        }
+        if let Some((colour, rule_width)) = decoration.rule {
+            window.paint_quad(gpui::fill(
+                gpui::Bounds::new(pos, gpui::size(rule_width, height)),
+                colour,
+            ));
         }
     }
 

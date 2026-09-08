@@ -23,6 +23,39 @@ impl HighlightStyleResolver for NoHighlightStyles {
     }
 }
 
+/// A slab painted behind one buffer line, with an optional rule on its left.
+///
+/// The engine paints this under the selection and the text, across the full
+/// width of the text area, so it is a block-level shape rather than a run's
+/// background.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LineDecoration {
+    /// Fill behind the whole line. `None` paints no slab.
+    pub background: Option<Hsla>,
+    /// A rule down the line's left edge -- a quote's bar -- and its width.
+    pub rule: Option<(Hsla, gpui::Pixels)>,
+    /// How far the line's text is pushed right, so it sits inside the slab
+    /// rather than against its edge.
+    pub indent: gpui::Pixels,
+    /// Whether this line is the first of its block, and whether it is the
+    /// last: the engine rounds the slab's outer corners accordingly, so a
+    /// fence draws as one rounded shape rather than a stack of bars.
+    pub first: bool,
+    pub last: bool,
+}
+
+impl Default for LineDecoration {
+    fn default() -> Self {
+        Self {
+            background: None,
+            rule: None,
+            indent: gpui::px(0.),
+            first: false,
+            last: false,
+        }
+    }
+}
+
 /// Parser-independent syntax highlighting seam consumed by the Base editor.
 ///
 /// Implementations own parsing, incremental state, and language-specific
@@ -116,6 +149,36 @@ pub trait InputHighlighter {
     fn line_height_scale(&self, line_range: &Range<usize>, text: &Rope, generation: u64) -> f32 {
         let _ = (line_range, text, generation);
         1.0
+    }
+
+    /// The slab the buffer line covering `line_range` sits on, if any.
+    ///
+    /// A `HighlightStyle`'s background paints behind the glyphs of its run and
+    /// nothing else: it cannot fill the blank to the right of a short line, or
+    /// the gutter to its left, so a block of code drawn that way reads as a
+    /// row of tinted words rather than one shape. And a run's background is
+    /// per token, so a fence whose language grammar styles its own keywords
+    /// comes out patchy.
+    ///
+    /// This is the block-level answer: one quad per line, painted under the
+    /// selection and the text, with the whole line's width and an optional
+    /// rule down its left edge. `indent` moves the line's text right, so a
+    /// quote or a fence can sit inside its slab instead of against it.
+    ///
+    /// Asked once per visible line on every layout, so it must be as cheap as
+    /// `conceals`.
+    ///
+    /// `resolver` is the same one `styles` is given, so the slab can be
+    /// tinted from the active theme rather than a colour compiled in.
+    ///
+    /// Default: no line is decorated.
+    fn line_decoration(
+        &self,
+        line_range: &Range<usize>,
+        resolver: &dyn HighlightStyleResolver,
+    ) -> Option<LineDecoration> {
+        let _ = (line_range, resolver);
+        None
     }
 
     /// The table row the buffer line covering `line_range` is, if it is one.

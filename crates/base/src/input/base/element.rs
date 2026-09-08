@@ -1757,6 +1757,9 @@ impl<M: InputModeKind> TextElement<M> {
 
             // Raw byte ranges (relative to the line start) hidden from display,
             // and the font-size multiplier for this line.
+            let decoration = highlighter.and_then(|h| {
+                h.line_decoration(&line_range, state.editor_style.highlight_styles.as_ref())
+            });
             let (concealed, line_font_size, widgets) = match highlighter {
                 Some(highlighter) => {
                     let concealed =
@@ -1822,6 +1825,7 @@ impl<M: InputModeKind> TextElement<M> {
                         .with_height_scale(state.display_map.line_height_scale(buffer_line))
                         .with_widgets(widgets)
                         .with_concealed(concealed)
+                        .with_decoration(decoration)
                         .with_table(table),
                 );
                 run_offset += line_text.len() + 1;
@@ -1851,7 +1855,8 @@ impl<M: InputModeKind> TextElement<M> {
                 .lines(wrapped_lines)
                 .with_height_scale(state.display_map.line_height_scale(buffer_line))
                 .with_widgets(widgets)
-                .with_concealed(concealed);
+                .with_concealed(concealed)
+                .with_decoration(decoration);
 
             // Use the first visual line's indentation width for continuation lines.
             let wrap_indent = if line_item.indent > 0 && line_layout.wrapped_lines.len() > 1 {
@@ -2836,7 +2841,9 @@ impl<M: InputModeKind> Element for TextElement<M> {
         {
             let mut y = origin.y + invisible_top_padding;
             let x = origin.x + prepaint.last_layout.line_number_width;
+            let slab_width = prepaint.bounds.size.width - prepaint.last_layout.line_number_width;
             for line in prepaint.last_layout.lines.iter() {
+                line.paint_decoration(point(x, y), slab_width, line_height, window);
                 line.paint_table_background(point(x, y), window);
                 y += line.size(line_height).height;
             }

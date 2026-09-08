@@ -78,7 +78,7 @@ pub use display_map::{
 pub use editor::{Editor, EditorState};
 pub use highlighting::{
     ColumnAlign, DiagnosticColors, FoldIconRenderer, HighlightStyleResolver, InlineWidget,
-    InlineWidgetKind, InputEditorStyle, InputHighlighter, InputHighlighterFactory,
+    InlineWidgetKind, InputEditorStyle, InputHighlighter, InputHighlighterFactory, LineDecoration,
     SharedHighlightStyleResolver, TableCellSpan, TableRow, TableRowKind,
 };
 pub use indent::TabSize;
