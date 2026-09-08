@@ -13,7 +13,7 @@ mod utils;
 
 use gpui::{App, ElementId, IntoElement, RenderOnce, SharedString, Window};
 pub use markdown_ext::*;
-pub use node::{CodeBlock, TableData};
+pub use node::{CodeBlock, TableData, TaskMark};
 pub use state::*;
 pub use style::*;
 pub use text_view::*;

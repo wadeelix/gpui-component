@@ -221,8 +221,11 @@ pub struct InlineWidget {
 /// application-supplied element would have nowhere safe to come from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InlineWidgetKind {
-    /// A GFM task checkbox. Clicking it asks the application to toggle.
-    Checkbox { checked: bool },
+    /// A task box. Clicking it asks the application to advance the state.
+    ///
+    /// Carries the same [`crate::text::TaskMark`] the Markdown renderer draws,
+    /// so a note looks the same while it is being edited and once it is read.
+    Checkbox { mark: crate::text::TaskMark },
 }
 
 /// One row of a GFM pipe table, as the application segments it for the

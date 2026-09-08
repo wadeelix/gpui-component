@@ -397,13 +397,15 @@ fn render_inline_widget<M: InputModeKind>(
     style: &crate::input::InputEditorStyle,
     state: gpui::WeakEntity<InputBaseState<M>>,
 ) -> impl IntoElement {
-    let crate::input::InlineWidgetKind::Checkbox { checked } = widget.kind;
+    let crate::input::InlineWidgetKind::Checkbox { mark } = widget.kind;
     let range = widget.range.clone();
     let (border, fill) = (style.border, style.foreground);
+    let checked = matches!(mark, crate::text::TaskMark::Done);
 
-    // A checked box carries a tick, not just a filled square: filled alone
-    // reads as a blob rather than as a box that has been ticked, and the two
-    // states then differ only by weight.
+    // The same five shapes the Markdown renderer draws (`TaskMark`), so a
+    // note does not change appearance between being edited and being read.
+    // A ticked box carries the tick rather than only being filled: filled
+    // alone reads as a blob, and the two states then differ only by weight.
     let mut box_ = gpui::div()
         .size(px(13.))
         .border_1()
@@ -417,13 +419,32 @@ fn render_inline_widget<M: InputModeKind>(
         } else {
             gpui::transparent_black()
         });
-    if checked {
-        box_ = box_.child(
-            gpui::svg()
-                .path("icons/check.svg")
-                .size(px(11.))
-                .text_color(style.background),
-        );
+    match mark {
+        crate::text::TaskMark::Todo => {}
+        crate::text::TaskMark::Done => {
+            box_ = box_.child(
+                gpui::svg()
+                    .path("icons/check.svg")
+                    .size(px(11.))
+                    .text_color(style.background),
+            );
+        }
+        // A filled dot: started.
+        crate::text::TaskMark::Doing => {
+            box_ = box_.child(gpui::div().size(px(5.)).rounded_full().bg(fill));
+        }
+        // A short bar, held clear of the sides: waiting on something else.
+        crate::text::TaskMark::Waiting => {
+            box_ = box_.child(gpui::div().w(px(5.)).h(px(1.5)).bg(fill));
+        }
+        // Filled and struck right across, edge to edge: dropped. Distinct
+        // from waiting's short bar at a glance, and drawn from the same
+        // primitives as the rest, so it needs no asset and follows the theme.
+        crate::text::TaskMark::Cancelled => {
+            box_ = box_
+                .bg(fill.opacity(0.15))
+                .child(gpui::div().w(px(11.)).h(px(1.5)).bg(fill));
+        }
     }
 
     // Fills the room it was given so the box lands on the text's centre line:

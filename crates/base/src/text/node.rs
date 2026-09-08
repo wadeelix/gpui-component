@@ -1889,9 +1889,13 @@ impl BlockNode {
         } else {
             CHECK_SVG_LIGHT
         };
+        // The same shapes, sizes and rounding the editor's inline widget
+        // draws (`render_inline_widget`), so a note does not change
+        // appearance between being edited and being read.
         let box_ = div()
             .flex()
-            .size(rems(0.875))
+            .size(px(13.))
+            .rounded(px(3.))
             .items_center()
             .justify_center()
             .border_1()
@@ -1903,53 +1907,29 @@ impl BlockNode {
                     ImageFormat::Svg,
                     check_svg.to_vec(),
                 )))
-                .size(rems(0.625)),
+                .size(px(11.)),
             ),
             // A filled dot at the centre: work has started.
             TaskMark::Doing => box_.child(
                 div()
-                    .size(rems(0.3125))
+                    .size(px(5.))
                     .rounded_full()
                     .bg(foreground)
                     .into_any_element(),
             ),
-            // A bar across the middle: blocked on something else.
-            TaskMark::Waiting => box_.child(
+            // A short bar, held clear of the sides: waiting on something else.
+            TaskMark::Waiting => {
+                box_.child(div().w(px(5.)).h(px(1.5)).bg(foreground).into_any_element())
+            }
+            // Filled and struck right across: dropped.
+            TaskMark::Cancelled => box_.bg(foreground.opacity(0.15)).child(
                 div()
-                    .w(rems(0.4375))
+                    .w(px(11.))
                     .h(px(1.5))
                     .bg(foreground)
                     .into_any_element(),
             ),
-            // A diagonal through the box: dropped. An image has no colour to
-            // inherit, so the theme's foreground is written into the SVG
-            // itself rather than left as `currentColor`.
-            TaskMark::Cancelled => box_.child(
-                img(Arc::new(Image::from_bytes(
-                    ImageFormat::Svg,
-                    Self::slash_svg_bytes(foreground),
-                )))
-                .size(rems(0.625))
-                .into_any_element(),
-            ),
         }
-    }
-
-    /// The cancelled box's diagonal, in `colour`.
-    ///
-    /// GPUI renders an image with no notion of the element's text colour, so
-    /// the stroke cannot be `currentColor`; the colour is substituted here.
-    fn slash_svg_bytes(colour: Hsla) -> Vec<u8> {
-        let rgb = colour.to_rgb();
-        let (r, g, b) = (
-            (rgb.r * 255.0).round() as u8,
-            (rgb.g * 255.0).round() as u8,
-            (rgb.b * 255.0).round() as u8,
-        );
-        format!(
-            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none"><path d="M3.5 12.5 12.5 3.5" stroke="#{r:02x}{g:02x}{b:02x}" stroke-width="1.8" stroke-linecap="round"/></svg>"##
-        )
-        .into_bytes()
     }
 
     fn render_list_item(

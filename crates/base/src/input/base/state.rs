@@ -2870,18 +2870,17 @@ impl<M: InputModeKind> InputBaseState<M> {
     /// setting the ink a further margin in; taking the margin at each end is
     /// what puts such a block over the text rather than a few pixels outside
     /// it.
-    pub fn text_insets(&self) -> Edges<Pixels> {
-        let gutter = self
-            .last_layout
-            .as_ref()
-            .map(|layout| layout.line_number_width)
-            .unwrap_or(px(0.));
-        Edges {
+    /// `None` until the editor has drawn once: the gutter is a measurement,
+    /// and answering `0` before there is anything to measure makes a caller
+    /// lay its block out at the wrong place for one frame, then jump.
+    pub fn text_insets(&self) -> Option<Edges<Pixels>> {
+        let gutter = self.last_layout.as_ref()?.line_number_width;
+        Some(Edges {
             top: px(0.),
             right: crate::input::element::RIGHT_MARGIN,
             bottom: px(0.),
             left: gutter + crate::input::element::RIGHT_MARGIN,
-        }
+        })
     }
 
     /// The byte offset under a window position, when the position is inside
