@@ -2074,7 +2074,9 @@ impl<M: InputModeKind> TextElement<M> {
                 && text_row_height * (rows as f32) < last_layout.line_height / 2.,
             chrome: TableChrome {
                 border: style.border,
-                header_background: style.muted_foreground.opacity(0.08),
+                header_background: style
+                    .editor_table_header
+                    .unwrap_or_else(|| style.muted_foreground.opacity(0.08)),
                 focused_background: style
                     .editor_active_line
                     .unwrap_or(style.border.opacity(0.15)),

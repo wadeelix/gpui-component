@@ -391,6 +391,11 @@ impl RenderOnce for Input {
                 editor_invisible: cx.theme().highlight_theme.style.editor_invisible,
                 editor_active_line: cx.theme().highlight_theme.style.editor_active_line,
                 editor_gutter_background: cx.theme().highlight_theme.style.editor_gutter_background,
+                // The palette's own table header, which a theme file states
+                // as `table.head.background` and reading mode already
+                // honours; the editor drew a wash of `muted_foreground`
+                // that no theme could address.
+                editor_table_header: Some(cx.theme().table_head),
                 fold_icon_renderer: Some(Rc::new(|ix, is_folded| {
                     Button::new(("fold-icon", ix))
                         .ghost()

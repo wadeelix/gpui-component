@@ -307,6 +307,9 @@ pub struct InputEditorStyle {
     pub editor_invisible: Option<Hsla>,
     pub editor_active_line: Option<Hsla>,
     pub editor_gutter_background: Option<Hsla>,
+    /// The band behind a table's header row. Unset, it is a wash of
+    /// `muted_foreground`, which no theme can address.
+    pub editor_table_header: Option<Hsla>,
     pub fold_icon_renderer: Option<FoldIconRenderer>,
 }
 
@@ -362,6 +365,7 @@ impl Default for InputEditorStyle {
             editor_invisible: None,
             editor_active_line: None,
             editor_gutter_background: None,
+            editor_table_header: None,
             fold_icon_renderer: None,
         }
     }
