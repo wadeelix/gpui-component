@@ -109,7 +109,9 @@ impl LanguageConfig {
 /// Theme for Tree-sitter Highlight
 ///
 /// https://docs.rs/tree-sitter-highlight/0.26.8/tree_sitter_highlight/
-#[derive(Debug, Default, Clone, PartialEq, Eq, Hash, JsonSchema, Serialize, Deserialize)]
+// Not `Eq`/`Hash`: `ThemeStyle` carries a fade, which is a float. Nothing
+// keys a map by a palette.
+#[derive(Debug, Default, Clone, PartialEq, JsonSchema, Serialize, Deserialize)]
 pub struct SyntaxColors {
     pub attribute: Option<ThemeStyle>,
     pub boolean: Option<ThemeStyle>,
@@ -225,11 +227,19 @@ impl From<FontWeightContent> for FontWeight {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, JsonSchema, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, JsonSchema, Serialize, Deserialize)]
 pub struct ThemeStyle {
     color: Option<Hsla>,
     font_style: Option<FontStyle>,
     font_weight: Option<FontWeightContent>,
+    /// How far the run is faded towards the background, 0.0-1.0. What a
+    /// consumer draws a finished task or a dimmed link with; without it a
+    /// theme can only say a colour, and the fade has to be synthesised.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fade_out: Option<f32>,
+    /// A line through the run, at this thickness in pixels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    strikethrough: Option<f32>,
 }
 
 impl From<ThemeStyle> for HighlightStyle {
@@ -238,6 +248,13 @@ impl From<ThemeStyle> for HighlightStyle {
             color: style.color,
             font_weight: style.font_weight.map(Into::into),
             font_style: style.font_style.map(Into::into),
+            fade_out: style.fade_out,
+            strikethrough: style.strikethrough.map(|thickness| {
+                gpui::StrikethroughStyle {
+                    thickness: gpui::px(thickness),
+                    ..Default::default()
+                }
+            }),
             ..Default::default()
         }
     }
@@ -444,7 +461,7 @@ impl StatusColors {
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Hash, JsonSchema, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, JsonSchema, Serialize, Deserialize)]
 pub struct HighlightThemeStyle {
     #[serde(rename = "editor.background")]
     pub editor_background: Option<Hsla>,
@@ -473,7 +490,7 @@ pub struct HighlightThemeStyle {
 /// This json is compatible with the Zed theme format.
 ///
 /// https://zed.dev/docs/extensions/languages#syntax-highlighting
-#[derive(Debug, Clone, PartialEq, Eq, Hash, JsonSchema, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, JsonSchema, Serialize, Deserialize)]
 pub struct HighlightTheme {
     pub name: String,
     #[serde(default)]
