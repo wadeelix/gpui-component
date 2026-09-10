@@ -107,6 +107,18 @@ impl TextView {
         self.inner = self.inner.on_link_click(f);
         self
     }
+    /// Reports the link under the pointer: its URL on every move over one,
+    /// and `None` once the pointer leaves it.
+    pub fn on_link_hover<F>(mut self, f: F) -> Self
+    where
+        F: Fn(Option<&SharedString>, &gpui::MouseMoveEvent, &mut Window, &mut App)
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.inner = self.inner.on_link_hover(f);
+        self
+    }
     /// Sets which Markdown extensions the parser accepts.
     pub fn markdown_extensions(mut self, value: MarkdownExtensions) -> Self {
         self.inner = self.inner.markdown_extensions(value);
