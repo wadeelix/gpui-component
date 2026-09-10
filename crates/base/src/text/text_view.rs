@@ -349,6 +349,13 @@ impl TextView {
         self
     }
 
+    /// Highlight `==text==` on `color`, as Obsidian does.
+    pub fn markdown_highlights(mut self, color: gpui::Hsla) -> Self {
+        let extensions = Arc::make_mut(&mut self.markdown_extensions);
+        *extensions = extensions.clone().highlights(color);
+        self
+    }
+
     /// Register a custom block-level Markdown parser.
     ///
     /// The parser runs during Markdown AST conversion and must be independent

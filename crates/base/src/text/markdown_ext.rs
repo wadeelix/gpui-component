@@ -176,6 +176,8 @@ impl PartialEq for MarkdownNode {
 #[derive(Clone, Default)]
 pub struct MarkdownExtensions {
     enable_mdx: bool,
+    /// Background of Obsidian's `==highlight==`; `None` leaves `==` as text.
+    highlight: Option<gpui::Hsla>,
     block_parsers: Vec<Arc<MarkdownBlockParserFn>>,
     block_renderers: HashMap<SharedString, Arc<MarkdownBlockRenderFn>>,
     revision: u64,
@@ -190,6 +192,17 @@ impl MarkdownExtensions {
         self.enable_mdx = true;
         self.bump_revision();
         self
+    }
+
+    /// Highlight text between a pair of `==` on `color`, as Obsidian does.
+    pub fn highlights(mut self, color: gpui::Hsla) -> Self {
+        self.highlight = Some(color);
+        self.bump_revision();
+        self
+    }
+
+    pub(crate) fn highlight_color(&self) -> Option<gpui::Hsla> {
+        self.highlight
     }
 
     /// Register a parser for block-level Markdown AST nodes.
@@ -246,6 +259,7 @@ impl MarkdownExtensions {
     /// stable; render handles may be refreshed without reparsing the document.
     pub(crate) fn has_same_parser_configuration(&self, other: &Self) -> bool {
         self.enable_mdx == other.enable_mdx
+            && self.highlight == other.highlight
             && self.block_parsers.len() == other.block_parsers.len()
             && self.block_renderers.len() == other.block_renderers.len()
             && self

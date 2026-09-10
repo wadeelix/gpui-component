@@ -117,6 +117,11 @@ impl TextView {
         self.inner = self.inner.markdown_mdx();
         self
     }
+    /// Highlights `==text==` on `color`, as Obsidian does.
+    pub fn markdown_highlights(mut self, color: gpui::Hsla) -> Self {
+        self.inner = self.inner.markdown_highlights(color);
+        self
+    }
     /// Parses custom block nodes out of the Markdown AST.
     pub fn markdown_block_parser<F>(mut self, parser: F) -> Self
     where

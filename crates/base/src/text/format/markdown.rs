@@ -38,6 +38,7 @@ fn parse_table_cell(row: &mut node::TableRow, node: &mdast::TableCell, cx: &mut 
     node.children.iter().for_each(|c| {
         parse_paragraph(&mut paragraph, c, cx);
     });
+    mark_highlights(&mut paragraph, cx);
     let table_cell = node::TableCell {
         children: paragraph,
         ..Default::default()
@@ -50,6 +51,135 @@ fn parse_table_cell(row: &mut node::TableRow, node: &mdast::TableCell, cx: &mut 
 ///
 /// If the last mark already covers the full run, merge into it. Otherwise add a
 /// new full-run mark. Empty runs are skipped so callers can flush freely.
+/// Obsidian's `==highlight==`, when the extensions ask for it: the text
+/// between a pair of `==` in one paragraph is highlighted and the markers go.
+///
+/// Obsidian's rules: an opener is not followed by whitespace, a closer does
+/// not follow it, and `==` inside inline code is text. The pair is found in
+/// the paragraph's joined text, so it may span emphasis or a link.
+fn mark_highlights(paragraph: &mut Paragraph, cx: &NodeContext) {
+    let Some(color) = cx.markdown_extensions.highlight_color() else {
+        return;
+    };
+    let mut joined = String::new();
+    let mut starts = Vec::with_capacity(paragraph.children.len());
+    for node in &paragraph.children {
+        starts.push(joined.len());
+        joined.push_str(&node.text);
+    }
+    if !joined.contains("==") {
+        return;
+    }
+
+    let pairs = {
+        let in_code = |at: usize| {
+            paragraph
+                .children
+                .iter()
+                .zip(&starts)
+                .find(|(node, start)| **start <= at && at < **start + node.text.len())
+                .is_some_and(|(node, start)| {
+                    node.marks
+                        .iter()
+                        .any(|(range, mark)| mark.code && range.contains(&(at - start)))
+                })
+        };
+        let mut pairs = Vec::new();
+        let mut search = 0;
+        while let Some(found) = joined[search..].find("==") {
+            let open = search + found;
+            search = open + 2;
+            if in_code(open)
+                || joined[open + 2..]
+                    .chars()
+                    .next()
+                    .is_none_or(char::is_whitespace)
+            {
+                continue;
+            }
+            let Some(found_close) = joined[open + 2..].find("==") else {
+                break;
+            };
+            let close = open + 2 + found_close;
+            if close == open + 2
+                || joined[..close]
+                    .chars()
+                    .last()
+                    .is_some_and(char::is_whitespace)
+                || in_code(close)
+            {
+                continue;
+            }
+            pairs.push((open, close));
+            search = close + 2;
+        }
+        pairs
+    };
+    if pairs.is_empty() {
+        return;
+    }
+
+    let markers: Vec<Range<usize>> = pairs
+        .iter()
+        .flat_map(|&(open, close)| [open..open + 2, close..close + 2])
+        .collect();
+    // Where a byte of the joined text lands once the markers are gone.
+    let shifted = |at: usize| {
+        at - markers
+            .iter()
+            .map(|marker| at.min(marker.end).saturating_sub(marker.start))
+            .sum::<usize>()
+    };
+
+    let children = std::mem::take(&mut paragraph.children);
+    for (node, start) in children.into_iter().zip(starts) {
+        let end = start + node.text.len();
+        if node.text.is_empty() {
+            paragraph.children.push(node);
+            continue;
+        }
+        let base = shifted(start);
+        let mut text = String::with_capacity(node.text.len());
+        let mut cursor = start;
+        for marker in markers.iter().filter(|m| m.start < end && start < m.end) {
+            let cut = marker.start.max(start);
+            if cursor < cut {
+                text.push_str(&node.text[cursor - start..cut - start]);
+            }
+            cursor = marker.end.min(end);
+        }
+        if cursor < end {
+            text.push_str(&node.text[cursor - start..]);
+        }
+        let mut marks: Vec<(Range<usize>, TextMark)> = node
+            .marks
+            .into_iter()
+            .map(|(range, mark)| {
+                (
+                    shifted(start + range.start) - base..shifted(start + range.end) - base,
+                    mark,
+                )
+            })
+            .filter(|(range, _)| !range.is_empty())
+            .collect();
+        for &(open, close) in &pairs {
+            let (from, to) = ((open + 2).max(start), close.min(end));
+            if from < to {
+                marks.push((
+                    shifted(from) - base..shifted(to) - base,
+                    TextMark::default().highlight(color),
+                ));
+            }
+        }
+        if text.is_empty() && node.image.is_none() {
+            continue;
+        }
+        let mut rebuilt = InlineNode::new(text).marks(marks);
+        rebuilt.image = node.image;
+        paragraph.children.push(rebuilt);
+    }
+}
+
 fn push_merged(
     paragraph: &mut Paragraph,
     text: String,
@@ -416,6 +546,7 @@ fn ast_to_node(source: &str, value: mdast::Node, cx: &mut NodeContext) -> BlockN
             val.children.iter().for_each(|c| {
                 parse_paragraph(&mut paragraph, c, cx);
             });
+            mark_highlights(&mut paragraph, cx);
             paragraph.span = new_span(val.position, cx);
             BlockNode::Paragraph(paragraph)
         }
@@ -489,6 +620,7 @@ fn ast_to_node(source: &str, value: mdast::Node, cx: &mut NodeContext) -> BlockN
             val.children.iter().for_each(|c| {
                 parse_paragraph(&mut paragraph, c, cx);
             });
+            mark_highlights(&mut paragraph, cx);
 
             BlockNode::Heading {
                 level: val.depth,
@@ -534,6 +666,7 @@ fn ast_to_node(source: &str, value: mdast::Node, cx: &mut NodeContext) -> BlockN
             val.children.iter().for_each(|c| {
                 parse_paragraph(&mut paragraph, c, cx);
             });
+            mark_highlights(&mut paragraph, cx);
             paragraph.span = new_span(val.position, cx);
             BlockNode::Paragraph(paragraph)
         }
@@ -542,6 +675,7 @@ fn ast_to_node(source: &str, value: mdast::Node, cx: &mut NodeContext) -> BlockN
             val.children.iter().for_each(|c| {
                 parse_paragraph(&mut paragraph, c, cx);
             });
+            mark_highlights(&mut paragraph, cx);
             paragraph.span = new_span(val.position, cx);
             BlockNode::Paragraph(paragraph)
         }
@@ -817,6 +951,58 @@ mod tests {
             assert_eq!(paragraph.children[1].text.as_ref(), "\n");
             assert_eq!(paragraph.children[2].text.as_ref(), "Persona: assistant");
         }
+    }
+
+    fn highlighted(paragraph: &Paragraph) -> Vec<String> {
+        paragraph
+            .children
+            .iter()
+            .flat_map(|node| {
+                node.marks
+                    .iter()
+                    .filter(|(_, mark)| mark.highlight.is_some())
+                    .map(|(range, _)| node.text[range.clone()].to_string())
+            })
+            .collect()
+    }
+
+    /// `==text==` is highlighted when asked for, across emphasis, and never
+    /// inside inline code or with whitespace inside its markers.
+    #[test]
+    fn highlights_mark_the_text_between_double_equals() {
+        let color: gpui::Hsla = gpui::rgb(0xfef08a).into();
+        let source = "Keep ==this **bold**== and `==code==` == not ==.";
+        let mut cx = NodeContext {
+            markdown_extensions: MarkdownExtensions::default().highlights(color).into(),
+            ..NodeContext::default()
+        };
+        let document = parse(source, &mut cx).unwrap();
+        let BlockNode::Paragraph(paragraph) = &document.blocks[0] else {
+            panic!("expected paragraph");
+        };
+        let text: String = paragraph.children.iter().map(|n| n.text.as_ref()).collect();
+        assert_eq!(text, "Keep this bold and ==code== == not ==.");
+        assert_eq!(highlighted(paragraph), ["this ", "bold"]);
+        let bold = paragraph
+            .children
+            .iter()
+            .find(|node| node.text.as_ref() == "bold")
+            .expect("bold keeps its own node");
+        assert!(bold.marks.iter().any(|(_, mark)| mark.bold));
+
+        let document = parse("# A ==title==", &mut cx).unwrap();
+        let BlockNode::Heading { children, .. } = &document.blocks[0] else {
+            panic!("expected heading");
+        };
+        assert_eq!(highlighted(children), ["title"]);
+
+        let mut plain = NodeContext::default();
+        let document = parse("a ==b== c", &mut plain).unwrap();
+        let BlockNode::Paragraph(paragraph) = &document.blocks[0] else {
+            panic!("expected paragraph");
+        };
+        let text: String = paragraph.children.iter().map(|n| n.text.as_ref()).collect();
+        assert_eq!(text, "a ==b== c", "off unless asked for");
     }
 
     #[derive(Debug, Clone, PartialEq)]
