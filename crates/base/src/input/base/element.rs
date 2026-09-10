@@ -991,8 +991,17 @@ impl<M: InputModeKind> TextElement<M> {
         let ranges = state.search_session.matcher.matched_ranges();
         let current_match_ix = state.search_session.matcher.current_match_index();
 
-        let mut paths = Vec::with_capacity(ranges.as_ref().len());
-        for (index, range) in ranges.as_ref().iter().enumerate() {
+        // Matches are sorted and disjoint, so only the visible ones are
+        // looked at: a common letter in a long note is tens of thousands of
+        // matches, and walking all of them every frame is a frame's budget.
+        let ranges = ranges.as_ref();
+        let visible = &last_layout.visible_range_offset;
+        let first = ranges.partition_point(|range| range.end <= visible.start);
+        let mut paths = Vec::new();
+        for (index, range) in ranges.iter().enumerate().skip(first) {
+            if range.start >= visible.end {
+                break;
+            }
             if let Some(path) = Self::layout_match_range(range.clone(), last_layout, bounds) {
                 paths.push((path, current_match_ix == index));
             }
@@ -3667,10 +3676,7 @@ mod tests {
         // Expressed in terms of the margin rather than a number: it is the
         // scrollbar's width, so a change there must not silently shrink the
         // scrollable area.
-        assert_eq!(
-            layout.scroll_size,
-            size(px(966.) + RIGHT_MARGIN, px(200.))
-        );
+        assert_eq!(layout.scroll_size, size(px(966.) + RIGHT_MARGIN, px(200.)));
 
         let layout_without_gutter =
             EditorScrollbarLayout::new(input_bounds, px(0.), size(px(500.), px(120.)), paddings);

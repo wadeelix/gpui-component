@@ -4,8 +4,9 @@ use std::ops::Range;
 
 use gpui::{
     App, AppContext as _, Context, Empty, Entity, FocusHandle, Focusable, Half,
-    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, Styled, Subscription,
-    WeakEntity, Window, actions, div, prelude::FluentBuilder as _,
+    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render,
+    StatefulInteractiveElement as _, Styled, Subscription, WeakEntity, Window, actions, div,
+    prelude::FluentBuilder as _,
 };
 
 use crate::{
@@ -158,7 +159,7 @@ impl<M: crate::input::overlay::OverlayMode> SearchPanel<M> {
         let query = self.search_input.read(cx).value();
         let editor = self.editor.clone();
         let _ = editor.update(cx, |state, cx| {
-            state.set_search_query(query.clone(), self.session.case_insensitive, cx);
+            state.set_search_options(query.clone(), self.session.options(), cx);
         });
         if let Ok(session) = editor.read_with(cx, |state, _| state.search_session().clone()) {
             self.session = session;
@@ -167,6 +168,19 @@ impl<M: crate::input::overlay::OverlayMode> SearchPanel<M> {
             self.session
                 .matcher
                 .update_cursor_by_offset(visible_range_offset.start);
+        }
+        cx.notify();
+    }
+
+    /// Limits the search to the editor's selection, or lifts the limit.
+    fn toggle_in_selection(&mut self, cx: &mut Context<Self>) {
+        let in_selection = !self.session.in_selection;
+        let editor = self.editor.clone();
+        let _ = editor.update(cx, |state, cx| {
+            state.set_search_in_selection(in_selection, cx);
+        });
+        if let Ok(session) = editor.read_with(cx, |state, _| state.search_session().clone()) {
+            self.session = session;
         }
         cx.notify();
     }
@@ -354,19 +368,68 @@ impl<M: crate::input::overlay::OverlayMode> Render for SearchPanel<M> {
                                 Input::new(&self.search_input)
                                     .focus_bordered(false)
                                     .suffix(
-                                        Button::new("case-insensitive")
-                                            .selected(!self.session.case_insensitive)
-                                            .toggled(!self.session.case_insensitive)
-                                            .xsmall()
-                                            .compact()
-                                            .text()
-                                            .icon(IconName::CaseSensitive)
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.session.case_insensitive =
-                                                    !this.session.case_insensitive;
-                                                this.update_search_query(None, cx);
-                                                cx.notify();
-                                            })),
+                                        h_flex()
+                                            .gap_0p5()
+                                            .child(
+                                                Button::new("case-insensitive")
+                                                    .selected(!self.session.case_insensitive)
+                                                    .toggled(!self.session.case_insensitive)
+                                                    .xsmall()
+                                                    .compact()
+                                                    .text()
+                                                    .icon(IconName::CaseSensitive)
+                                                    .tooltip("Match case")
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.session.case_insensitive =
+                                                            !this.session.case_insensitive;
+                                                        this.update_search_query(None, cx);
+                                                        cx.notify();
+                                                    })),
+                                            )
+                                            .child(
+                                                Button::new("whole-word")
+                                                    .selected(self.session.whole_word)
+                                                    .toggled(self.session.whole_word)
+                                                    .xsmall()
+                                                    .compact()
+                                                    .text()
+                                                    .icon(IconName::WholeWord)
+                                                    .tooltip("Match whole word")
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.session.whole_word =
+                                                            !this.session.whole_word;
+                                                        this.update_search_query(None, cx);
+                                                        cx.notify();
+                                                    })),
+                                            )
+                                            .child(
+                                                Button::new("regex")
+                                                    .selected(self.session.regex)
+                                                    .toggled(self.session.regex)
+                                                    .xsmall()
+                                                    .compact()
+                                                    .text()
+                                                    .icon(IconName::Regex)
+                                                    .tooltip("Use regular expression")
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.session.regex = !this.session.regex;
+                                                        this.update_search_query(None, cx);
+                                                        cx.notify();
+                                                    })),
+                                            )
+                                            .child(
+                                                Button::new("in-selection")
+                                                    .selected(self.session.in_selection)
+                                                    .toggled(self.session.in_selection)
+                                                    .xsmall()
+                                                    .compact()
+                                                    .text()
+                                                    .icon(IconName::TextSelect)
+                                                    .tooltip("Find in selection")
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.toggle_in_selection(cx);
+                                                    })),
+                                            ),
                                     )
                                     .small()
                                     .w_full()
@@ -412,14 +475,32 @@ impl<M: crate::input::overlay::OverlayMode> Render for SearchPanel<M> {
                                 this.next(window, cx);
                             })),
                     )
-                    .child(
-                        Label::new(self.session.matcher.label())
+                    .child(match self.session.matcher.error() {
+                        // A regex that does not compile says so where the
+                        // count would be, rather than looking like no match.
+                        Some(error) => div()
+                            .id("search-error")
+                            .min_w_16()
+                            .child(
+                                Label::new("Invalid regex")
+                                    .text_color(cx.theme().danger)
+                                    .text_left(),
+                            )
+                            .tooltip({
+                                let error = gpui::SharedString::from(error.to_owned());
+                                move |window, cx| {
+                                    crate::tooltip::Tooltip::new(error.clone()).build(window, cx)
+                                }
+                            })
+                            .into_any_element(),
+                        None => Label::new(self.session.matcher.label())
                             .when(!has_matches, |this| {
                                 this.text_color(cx.theme().muted_foreground)
                             })
                             .text_left()
-                            .min_w_16(),
-                    )
+                            .min_w_16()
+                            .into_any_element(),
+                    })
                     .child(div().w_7())
                     .child(
                         Button::new("close")

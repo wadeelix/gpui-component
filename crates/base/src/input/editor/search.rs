@@ -1,21 +1,46 @@
 use crate::input::InputModeKind;
-use aho_corasick::AhoCorasick;
 use gpui::{Context, Window};
+use regex::{Regex, RegexBuilder};
 use ropey::Rope;
 use std::{ops::Range, rc::Rc};
 
-use super::{
-    InputBaseState, Replace, RopeExt as _, Search, movement::MoveDirection, state::ScrollPadding,
-};
+use super::{InputBaseState, Replace, Search, movement::MoveDirection, state::ScrollPadding};
+
+/// How a search query matches.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SearchOptions {
+    pub case_sensitive: bool,
+    /// Only where the query stands as a whole word.
+    pub whole_word: bool,
+    /// The query is a regular expression rather than literal text.
+    pub regex: bool,
+}
+
+/// The most a compiled query may take. A pattern past this is refused with
+/// an error rather than allowed to allocate without bound.
+const PATTERN_SIZE_LIMIT: usize = 8 * 1024 * 1024;
 
 /// Stateful, presentation-independent search engine used by text inputs.
+///
+/// Every query compiles to one regular expression, literal text escaped:
+/// that gives Unicode case folding (an ASCII-only fold does not find
+/// "заметка" for "Заметка"), whole words by `\b`, and regex mode from the
+/// same code path.
 #[derive(Debug, Clone)]
 pub struct SearchMatcher {
     text: Rope,
-    pub query: Option<AhoCorasick>,
+    pattern: Option<Regex>,
+    options: SearchOptions,
+    /// Why the query did not compile, in regex mode.
+    error: Option<String>,
+    /// Only matches inside this byte range count: search within a selection.
+    scope: Option<Range<usize>>,
     matched_ranges: Rc<Vec<Range<usize>>>,
     current_match_ix: usize,
     replacing: bool,
+    /// The text changed while nobody was looking at the matches; they are
+    /// worked out again when someone does.
+    stale: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -23,6 +48,11 @@ pub struct SearchSession {
     pub open: bool,
     pub replace_mode: bool,
     pub case_insensitive: bool,
+    pub whole_word: bool,
+    pub regex: bool,
+    /// Whether matches are limited to the selection made when this was turned
+    /// on.
+    pub in_selection: bool,
     pub query: String,
     pub replacement: String,
     pub anchor_offset: Option<usize>,
@@ -35,6 +65,9 @@ impl Default for SearchSession {
             open: false,
             replace_mode: false,
             case_insensitive: true,
+            whole_word: false,
+            regex: false,
+            in_selection: false,
             query: String::new(),
             replacement: String::new(),
             anchor_offset: None,
@@ -54,14 +87,33 @@ impl SearchSession {
     }
 
     pub(crate) fn update_query(&mut self, query: impl Into<String>, case_insensitive: bool) {
+        let options = SearchOptions {
+            case_sensitive: !case_insensitive,
+            ..self.options()
+        };
+        self.update_query_with(query, options);
+    }
+
+    pub(crate) fn update_query_with(&mut self, query: impl Into<String>, options: SearchOptions) {
         let query = query.into();
-        if self.query == query && self.case_insensitive == case_insensitive {
+        if self.query == query && self.options() == options {
             return;
         }
 
         self.query = query;
-        self.case_insensitive = case_insensitive;
-        self.matcher.update_query(&self.query, case_insensitive);
+        self.case_insensitive = !options.case_sensitive;
+        self.whole_word = options.whole_word;
+        self.regex = options.regex;
+        self.matcher.set_query(&self.query, options);
+    }
+
+    /// The options the session matches with.
+    pub fn options(&self) -> SearchOptions {
+        SearchOptions {
+            case_sensitive: !self.case_insensitive,
+            whole_word: self.whole_word,
+            regex: self.regex,
+        }
     }
 }
 
@@ -146,6 +198,30 @@ impl<M: InputModeKind> InputBaseState<M> {
         cx.notify();
     }
 
+    /// Sets the query together with how it matches: case, whole words,
+    /// regular expression.
+    pub fn set_search_options(
+        &mut self,
+        query: impl Into<String>,
+        options: SearchOptions,
+        cx: &mut Context<Self>,
+    ) {
+        self.search_session.update_query_with(query, options);
+        self.search_session.matcher.update(&self.text);
+        cx.notify();
+    }
+
+    /// Limits the search to the current selection, or lifts the limit. A
+    /// selection that is empty limits nothing.
+    pub fn set_search_in_selection(&mut self, in_selection: bool, cx: &mut Context<Self>) {
+        let selected = self.selected_range();
+        let scope = (in_selection && !selected.is_empty()).then_some(selected);
+        self.search_session.in_selection = scope.is_some();
+        self.search_session.matcher.update(&self.text);
+        self.search_session.matcher.set_scope(scope);
+        cx.notify();
+    }
+
     pub fn close_search(&mut self, cx: &mut Context<Self>) {
         self.search_session.close();
         cx.notify();
@@ -184,6 +260,7 @@ impl<M: InputModeKind> InputBaseState<M> {
         else {
             return false;
         };
+        let replacement = matcher.replacement_for(&range, replacement);
         let next = matcher.peek().unwrap_or_else(|| range.clone());
         let direction = matcher
             .has_next_without_wrap()
@@ -192,9 +269,10 @@ impl<M: InputModeKind> InputBaseState<M> {
             matcher.set_current_match_index(0);
         }
         matcher.begin_replacement();
+        matcher.shift_scope_for(&range, replacement.len());
         let range_utf16 = self.range_to_utf16(&range);
         self.scroll_to(next.end, direction, cx);
-        self.replace_text_in_range_silent(Some(range_utf16), replacement, window, cx);
+        self.replace_text_in_range_silent(Some(range_utf16), &replacement, window, cx);
         true
     }
 
@@ -207,23 +285,42 @@ impl<M: InputModeKind> InputBaseState<M> {
         if !self.is_replaceable() {
             return 0;
         }
-        let ranges = self.search_session.matcher.matched_ranges();
-        if ranges.is_empty() {
+        let edits = self.search_session.matcher.replacements(replacement);
+        if edits.is_empty() {
             return 0;
         }
-        let mut text = self.text.clone();
-        for range in ranges.iter().rev() {
-            text.replace(range.clone(), replacement);
+        let count = edits.len();
+        // Where the caret ends up: moved by every replacement before it, so
+        // the reader stays where they were rather than at the top of the note.
+        let cursor = self.cursor();
+        let mut caret = cursor;
+        for (range, new_text) in &edits {
+            if range.end <= cursor {
+                caret = caret + new_text.len() - range.len();
+            } else if range.start < cursor {
+                caret = caret + range.start + new_text.len() - cursor.min(range.end);
+            }
         }
         self.search_session.matcher.begin_replacement();
-        let count = ranges.len();
-        self.replace_text_in_range_silent(Some(0..self.text.len()), &text.to_string(), window, cx);
-        self.scroll_to(0, Some(MoveDirection::Down), cx);
+        self.search_session.matcher.set_scope(None);
+        self.search_session.in_selection = false;
+        // One transaction of exact edits rather than the whole text replaced:
+        // one undo step, and only the edited ranges are parsed again.
+        self.replace_text_in_ranges(&edits, window, cx);
+        let caret = caret.min(self.text.len());
+        self.set_selected_range(caret..caret, cx);
         count
     }
 
+    /// Keeps the matches following the text -- while the panel is open. A
+    /// closed panel keeps its query but not its matches: recomputing them was
+    /// a scan of the whole document on every keystroke nobody was searching.
     pub(super) fn update_search(&mut self, _cx: &mut gpui::App) {
-        self.search_session.matcher.update(&self.text);
+        if self.search_session.open {
+            self.search_session.matcher.update(&self.text);
+        } else {
+            self.search_session.matcher.defer(&self.text);
+        }
     }
 
     pub(super) fn on_action_search(&mut self, _: &Search, _: &mut Window, cx: &mut Context<Self>) {
@@ -256,31 +353,117 @@ impl SearchMatcher {
     pub fn new() -> Self {
         Self {
             text: "".into(),
-            query: None,
+            pattern: None,
+            options: SearchOptions::default(),
+            error: None,
+            scope: None,
             matched_ranges: Rc::new(Vec::new()),
             current_match_ix: 0,
             replacing: false,
+            stale: false,
         }
     }
 
     /// Update the source text and recompute matches.
     pub fn update(&mut self, text: &Rope) {
-        if self.text.eq(text) {
+        if !self.stale && self.text.eq(text) {
             self.replacing = false;
             return;
         }
+        if !self.replacing {
+            // A selection's offsets mean nothing once the text around them
+            // changed by anything but a replacement.
+            self.scope = None;
+        }
         self.text = text.clone();
+        self.stale = false;
         self.update_matches();
     }
 
+    /// Takes the new text without matching it. `update` works the matches
+    /// out when they are needed again.
+    pub fn defer(&mut self, text: &Rope) {
+        self.text = text.clone();
+        self.scope = None;
+        self.stale = true;
+    }
+
     pub fn update_query(&mut self, query: &str, case_insensitive: bool) {
-        self.query = (!query.is_empty()).then(|| {
-            AhoCorasick::builder()
-                .ascii_case_insensitive(case_insensitive)
-                .build([query])
-                .expect("failed to build input search query")
-        });
+        let options = SearchOptions {
+            case_sensitive: !case_insensitive,
+            ..self.options
+        };
+        self.set_query(query, options);
+    }
+
+    /// Compiles `query` under `options` and matches it.
+    pub fn set_query(&mut self, query: &str, options: SearchOptions) {
+        self.options = options;
+        self.error = None;
+        self.pattern = None;
+        if !query.is_empty() {
+            match compile(query, options) {
+                Ok(pattern) => self.pattern = Some(pattern),
+                Err(error) => self.error = Some(error),
+            }
+        }
+        self.stale = false;
         self.update_matches();
+    }
+
+    /// Why the query does not compile, when it is an invalid regex.
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    /// Limits matches to `scope`, a byte range of the text.
+    pub fn set_scope(&mut self, scope: Option<Range<usize>>) {
+        self.scope = scope;
+        self.update_matches();
+    }
+
+    /// Keeps a scope covering the same text after `range` is replaced by
+    /// `replacement_len` bytes.
+    fn shift_scope_for(&mut self, range: &Range<usize>, replacement_len: usize) {
+        if let Some(scope) = self.scope.as_mut()
+            && range.end <= scope.end
+        {
+            scope.end = scope.end + replacement_len - range.len();
+        }
+    }
+
+    /// What replaces the match at `range`: `template` as written, or in regex
+    /// mode with `$1` and `${name}` filled from that match.
+    pub fn replacement_for(&self, range: &Range<usize>, template: &str) -> String {
+        match (&self.pattern, self.options.regex) {
+            (Some(pattern), true) => {
+                let text = self.text.to_string();
+                expand(pattern, &text, range, template).unwrap_or_else(|| template.to_owned())
+            }
+            _ => template.to_owned(),
+        }
+    }
+
+    /// Every match with what replaces it, in order.
+    pub fn replacements(&self, template: &str) -> Vec<(Range<usize>, String)> {
+        let ranges = self.matched_ranges.as_ref();
+        match (&self.pattern, self.options.regex) {
+            (Some(pattern), true) => {
+                let text = self.text.to_string();
+                ranges
+                    .iter()
+                    .map(|range| {
+                        let replacement = expand(pattern, &text, range, template)
+                            .unwrap_or_else(|| template.to_owned());
+                        (range.clone(), replacement)
+                    })
+                    .collect()
+            }
+            _ => ranges
+                .iter()
+                .map(|range| (range.clone(), template.to_owned()))
+                .collect(),
+        }
     }
 
     pub fn matched_ranges(&self) -> Rc<Vec<Range<usize>>> {
@@ -326,7 +509,7 @@ impl SearchMatcher {
     }
 
     /// Preserve the current logical match while a replacement mutates text.
-    fn begin_replacement(&mut self) {
+    pub(crate) fn begin_replacement(&mut self) {
         self.replacing = true;
     }
 
@@ -346,12 +529,22 @@ impl SearchMatcher {
 
     fn update_matches(&mut self) {
         let mut ranges = Vec::new();
-        if let Some(query) = &self.query {
+        if let Some(pattern) = &self.pattern {
             let text = self.text.to_string();
+            let scope = self
+                .scope
+                .clone()
+                .map(|scope| scope.start.min(text.len())..scope.end.min(text.len()))
+                .unwrap_or(0..text.len());
+            // Over the whole text, so an anchor or a word boundary sees the
+            // text around the scope; the scope then filters. An empty match
+            // (`^`, `a*`) marks nothing a reader could replace.
             ranges.extend(
-                query
-                    .stream_find_iter(text.as_bytes())
-                    .map(|result| result.expect("input search match").range()),
+                pattern
+                    .find_iter(&text)
+                    .filter(|found| found.start() < found.end())
+                    .filter(|found| found.start() >= scope.start && found.end() <= scope.end)
+                    .map(|found| found.range()),
             );
         }
         self.matched_ranges = Rc::new(ranges);
@@ -362,6 +555,38 @@ impl SearchMatcher {
         }
         self.replacing = false;
     }
+}
+
+/// `query` as the one regular expression it matches as.
+fn compile(query: &str, options: SearchOptions) -> Result<Regex, String> {
+    let body = if options.regex {
+        query.to_owned()
+    } else {
+        regex::escape(query)
+    };
+    let body = if options.whole_word {
+        format!(r"\b(?:{body})\b")
+    } else {
+        body
+    };
+    RegexBuilder::new(&body)
+        .case_insensitive(!options.case_sensitive)
+        .multi_line(true)
+        .size_limit(PATTERN_SIZE_LIMIT)
+        .build()
+        .map_err(|err| err.to_string())
+}
+
+/// `template` expanded from the match of `pattern` at exactly `range`.
+fn expand(pattern: &Regex, text: &str, range: &Range<usize>, template: &str) -> Option<String> {
+    let captures = pattern.captures_at(text, range.start)?;
+    let whole = captures.get(0)?;
+    if whole.range() != *range {
+        return None;
+    }
+    let mut out = String::new();
+    captures.expand(template, &mut out);
+    Some(out)
 }
 
 impl Iterator for SearchMatcher {
@@ -469,5 +694,128 @@ mod tests {
         assert_eq!(matcher.len(), 2);
         assert_eq!(matcher.current_match_index(), 1);
         assert_eq!(matcher.label(), "2/2");
+    }
+}
+
+#[cfg(test)]
+mod option_tests {
+    use super::*;
+
+    fn matcher(text: &str, query: &str, options: SearchOptions) -> SearchMatcher {
+        let mut matcher = SearchMatcher::new();
+        matcher.update(&Rope::from(text));
+        matcher.set_query(query, options);
+        matcher
+    }
+
+    fn found(matcher: &SearchMatcher) -> Vec<Range<usize>> {
+        matcher.matched_ranges().as_ref().clone()
+    }
+
+    /// An ASCII-only fold finds nothing here; the reader of a Russian note
+    /// expects both.
+    #[test]
+    fn case_folds_beyond_ascii() {
+        let text = "Заметка и заметка";
+        let loose = matcher(text, "заметка", SearchOptions::default());
+        assert_eq!(loose.len(), 2);
+        let strict = matcher(
+            text,
+            "заметка",
+            SearchOptions {
+                case_sensitive: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(found(&strict), [text.rfind("заметка").unwrap()..text.len()]);
+    }
+
+    #[test]
+    fn whole_word_skips_the_word_inside_another() {
+        let options = SearchOptions {
+            whole_word: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            found(&matcher("cat concat cat.", "cat", options)),
+            [0..3, 11..14]
+        );
+    }
+
+    #[test]
+    fn literal_text_is_not_a_pattern() {
+        assert_eq!(
+            found(&matcher("a.b axb", "a.b", SearchOptions::default())),
+            [0..3]
+        );
+    }
+
+    #[test]
+    fn a_regex_matches_and_an_invalid_one_says_why() {
+        let options = SearchOptions {
+            regex: true,
+            ..Default::default()
+        };
+        assert_eq!(found(&matcher("a1 b22", r"\d+", options)), [1..2, 4..6]);
+
+        let broken = matcher("a1 b22", "(", options);
+        assert!(broken.is_empty());
+        assert!(broken.error().is_some());
+
+        let fixed = {
+            let mut m = broken;
+            m.set_query(r"\d", options);
+            m
+        };
+        assert!(fixed.error().is_none(), "a fixed query clears the error");
+    }
+
+    /// `^` or `a*` match nothing a reader could see or replace.
+    #[test]
+    fn empty_matches_are_not_matches() {
+        let options = SearchOptions {
+            regex: true,
+            ..Default::default()
+        };
+        assert!(matcher("one\ntwo", "^", options).is_empty());
+        assert_eq!(found(&matcher("baab", "a*", options)), [1..3]);
+    }
+
+    #[test]
+    fn a_regex_replacement_fills_its_groups_and_a_literal_one_does_not() {
+        let options = SearchOptions {
+            regex: true,
+            ..Default::default()
+        };
+        let regex = matcher("ann@home bob@work", r"(\w+)@(\w+)", options);
+        assert_eq!(
+            regex.replacements("$2 at ${1}"),
+            [
+                (0..8, "home at ann".to_string()),
+                (9..17, "work at bob".to_string())
+            ]
+        );
+        let literal = matcher("ann@home", "@", SearchOptions::default());
+        assert_eq!(literal.replacements("$1"), [(3..4, "$1".to_string())]);
+    }
+
+    #[test]
+    fn a_scope_limits_the_matches_and_an_edit_lifts_it() {
+        let mut m = matcher("foo foo foo", "foo", SearchOptions::default());
+        m.set_scope(Some(4..11));
+        assert_eq!(found(&m), [4..7, 8..11]);
+        m.update(&Rope::from("foo foo foo!"));
+        assert_eq!(m.len(), 3, "typing ended the selection's scope");
+    }
+
+    /// A closed panel's matcher only takes the text; the scan waits until the
+    /// matches are asked for.
+    #[test]
+    fn deferred_text_is_matched_when_asked() {
+        let mut m = matcher("foo", "foo", SearchOptions::default());
+        m.defer(&Rope::from("foo foo"));
+        assert_eq!(m.len(), 1, "nothing was scanned yet");
+        m.update(&Rope::from("foo foo"));
+        assert_eq!(m.len(), 2);
     }
 }
