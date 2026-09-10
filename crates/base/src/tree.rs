@@ -9,6 +9,7 @@ use gpui::{
 
 use crate::{
     actions::{Confirm, SelectDown, SelectLeft, SelectRight, SelectUp},
+    scrollbar::Scrollbar,
     styled::StyledExt as _,
 };
 
@@ -418,6 +419,19 @@ impl TreeState {
 impl Render for TreeState {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let render_item = self.render_item.clone();
+        // The list scrolls, so it says so. `uniform_list` tracks a scroll
+        // handle but draws no bar of its own, which left every tree scrolling
+        // silently.
+        //
+        // The bar floats -- that is what lets it fade when idle -- so the list
+        // carries a gutter of its width, or the rows run underneath it and a
+        // file name is unreadable exactly while it is being scrolled past.
+        let scrollbar = Scrollbar::vertical(&self.scroll_handle);
+        div()
+            .relative()
+            .size_full()
+            .child(scrollbar)
+            .child(
         uniform_list("entries", self.entries.len(), {
             cx.processor(move |state, visible_range: Range<usize>, window, cx| {
                 visible_range
@@ -450,7 +464,9 @@ impl Render for TreeState {
             })
         })
         .track_scroll(&self.scroll_handle)
-        .refine_style(&self.list_style)
+        .pr(Scrollbar::width())
+        .refine_style(&self.list_style),
+            )
     }
 }
 
