@@ -395,6 +395,8 @@ pub struct InputBaseState<M: InputModeKind> {
     /// container and would otherwise take every click before the widget could,
     /// leaving a checkbox that draws correctly but never toggles.
     pub(super) widget_hitboxes: RefCell<Vec<Bounds<Pixels>>>,
+    /// Draws the blocks a highlighter asks for (ADR-0009).
+    pub(crate) block_renderer: Option<crate::input::BlockRenderer>,
     /// The table insertion marker the pointer is near, if any.
     pub(crate) table_marker: Option<TableMarker>,
     /// Whether tables offer insertion markers under the pointer at all.
@@ -721,6 +723,7 @@ impl<M: InputModeKind> InputBaseState<M> {
             scroll_size: gpui::size(px(0.), px(0.)),
             editor_scrollbar_snapshot: Cell::new(None),
             widget_hitboxes: RefCell::new(Vec::new()),
+            block_renderer: None,
             table_marker: None,
             table_handles: true,
             editor_paddings: Edges::default(),
@@ -920,6 +923,38 @@ impl<M: InputModeKind> InputBaseState<M> {
     /// a table that starts or stops being laid out as one because the caret
     /// moved, for instance. Bounded to `range`, unlike
     /// [`Self::refresh_line_heights`].
+    /// Registers what draws the blocks a highlighter asks for (ADR-0009).
+    pub fn set_block_renderer(
+        &mut self,
+        renderer: Option<crate::input::BlockRenderer>,
+        cx: &mut Context<Self>,
+    ) {
+        self.block_renderer = renderer;
+        cx.notify();
+    }
+
+    /// Re-lays out the lines covering `range` after something other than an
+    /// edit changed their height -- a block that measured itself -- and keeps
+    /// the view still: when they lie above the first visible line, the scroll
+    /// offset moves by the height they gained or lost (ADR-0009).
+    pub fn rewrap_lines_anchored(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
+        let anchor = self
+            .last_layout
+            .as_ref()
+            .and_then(|layout| Some((*layout.visible_buffer_lines.first()?, layout.line_height)));
+        let before = anchor.map(|(line, _)| self.display_map.buffer_line_top(line));
+        self.display_map.rewrap(range, cx);
+        if let (Some((line, line_height)), Some(before)) = (anchor, before) {
+            let moved = self.display_map.buffer_line_top(line) - before;
+            if moved != 0.0 {
+                let mut offset = self.scroll_handle.offset();
+                offset.y -= line_height * moved;
+                self.scroll_handle.set_offset(offset);
+            }
+        }
+        cx.notify();
+    }
+
     pub fn rewrap_lines(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
         self.display_map.rewrap(range, cx);
         // Rows may have moved under a marker placed before; it comes back
@@ -6335,6 +6370,203 @@ mod tests {
         editor
             .input
             .read_with(&mut editor_cx, |state, _| assert!(state.soft_wrap));
+    }
+
+    /// A highlighter that turns one line into a block (ADR-0009): its text
+    /// hidden, its height `scale` lines, a block asked for on it.
+    struct BlockHighlighter {
+        block_line_start: usize,
+        scale: Rc<std::cell::Cell<f32>>,
+    }
+
+    impl crate::input::InputHighlighter for BlockHighlighter {
+        fn language(&self) -> SharedString {
+            "block-test".into()
+        }
+
+        fn update(
+            &mut self,
+            _edit: Option<crate::input::InputEdit>,
+            _text: &Rope,
+            _folding: bool,
+            _window: &mut Window,
+            _cx: &mut Context<crate::input::EditorState>,
+        ) {
+        }
+
+        fn styles(
+            &self,
+            range: &Range<usize>,
+            _resolver: &dyn crate::input::HighlightStyleResolver,
+        ) -> Vec<(Range<usize>, HighlightStyle)> {
+            vec![(range.clone(), HighlightStyle::default())]
+        }
+
+        fn fold_ranges(&self, _text: &Rope) -> Vec<crate::input::FoldRange> {
+            Vec::new()
+        }
+
+        fn conceals(&self, range: &Range<usize>) -> Vec<Range<usize>> {
+            if range.start == self.block_line_start && !range.is_empty() {
+                vec![range.clone()]
+            } else {
+                Vec::new()
+            }
+        }
+
+        fn line_height_scale(&self, line_range: &Range<usize>, _: &Rope, _: u64) -> f32 {
+            if line_range.start == self.block_line_start {
+                self.scale.get()
+            } else {
+                1.0
+            }
+        }
+
+        fn block_widget(&self, line_range: &Range<usize>) -> Option<crate::input::BlockWidget> {
+            (line_range.start == self.block_line_start).then(|| crate::input::BlockWidget {
+                id: "img".into(),
+                data: Rc::new(()),
+            })
+        }
+    }
+
+    fn block_factory(
+        block_line_start: usize,
+        scale: Rc<std::cell::Cell<f32>>,
+    ) -> crate::input::InputHighlighterFactory {
+        Rc::new(move |_lang: &str| {
+            Some(Box::new(BlockHighlighter {
+                block_line_start,
+                scale: scale.clone(),
+            }) as Box<dyn crate::input::InputHighlighter>)
+        })
+    }
+
+    /// A block is drawn over its line at the height the line was given, told
+    /// its range and size, and a click inside it does not move the caret.
+    #[gpui::test]
+    fn test_a_block_is_laid_out_over_its_line_and_owns_its_clicks(cx: &mut TestAppContext) {
+        // Line 1, "IMG" (4..7), becomes a block four lines tall.
+        let input_view =
+            InputView::build_editor(cx, |state| state.default_value("one\nIMG\nthree"));
+        let mut cx = VisualTestContext::from_window(input_view.window_handle.into(), cx);
+        let input = input_view.input;
+        let drawn: Rc<RefCell<Vec<crate::input::BlockContext>>> = Rc::default();
+        let renderer: crate::input::BlockRenderer = {
+            let drawn = drawn.clone();
+            Rc::new(move |block, context, _, _| {
+                assert_eq!(block.id.as_ref(), "img");
+                drawn.borrow_mut().push(context.clone());
+                gpui::div().size_full().into_any_element()
+            })
+        };
+        cx.update(|_, cx| {
+            input.update(cx, |state, cx| {
+                state.set_highlighter_factory(
+                    block_factory(4, Rc::new(std::cell::Cell::new(4.0))),
+                    cx,
+                );
+                state.set_block_renderer(Some(renderer), cx);
+                state.set_selected_range(0..0, cx);
+            });
+        });
+        cx.run_until_parked();
+        // The highlighter exists once the text has been parsed; its heights
+        // are read from then on.
+        cx.update(|_, cx| input.update(cx, |state, cx| state.refresh_line_heights(cx)));
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let context = drawn.borrow().last().cloned().expect("the block was drawn");
+        assert_eq!(context.range, 4..7);
+        let (hitbox, line_height) = cx.update(|_, cx| {
+            input.read_with(cx, |state, _| {
+                let hitboxes = state.widget_hitboxes.borrow();
+                assert_eq!(hitboxes.len(), 1, "one block, one hitbox");
+                (hitboxes[0], state.last_layout.as_ref().unwrap().line_height)
+            })
+        });
+        assert_eq!(context.size.height, line_height * 4.0);
+        assert_eq!(hitbox.size.height, line_height * 4.0);
+
+        cx.simulate_mouse_down(
+            hitbox.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            hitbox.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.run_until_parked();
+        let selected = cx.update(|_, cx| input.read_with(cx, |state, _| state.selected_range()));
+        assert_eq!(selected, 0..0, "the click was the block's");
+    }
+
+    /// A block above the view that grows moves the scroll offset with it, so
+    /// the first visible line stays where it was.
+    #[gpui::test]
+    fn test_a_block_growing_above_the_view_keeps_the_view_still(cx: &mut TestAppContext) {
+        let text: SharedString = (0..200)
+            .map(|n| format!("line {n}\n"))
+            .collect::<String>()
+            .into();
+        let input_view =
+            InputView::build_editor(cx, move |state| state.default_value(text.clone()));
+        let mut cx = VisualTestContext::from_window(input_view.window_handle.into(), cx);
+        let input = input_view.input;
+        let scale = Rc::new(std::cell::Cell::new(1.0));
+        // "line 1" starts at byte 7.
+        cx.update(|_, cx| {
+            input.update(cx, |state, cx| {
+                state.set_highlighter_factory(block_factory(7, scale.clone()), cx);
+            });
+        });
+        cx.run_until_parked();
+        // The highlighter exists once the text has been parsed; its heights
+        // are read from then on.
+        cx.update(|_, cx| input.update(cx, |state, cx| state.refresh_line_heights(cx)));
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let line_height = cx.update(|_, cx| {
+            input.read_with(cx, |state, _| {
+                state.last_layout.as_ref().unwrap().line_height
+            })
+        });
+        cx.update(|_, cx| {
+            input.update(cx, |state, cx| {
+                state.set_scroll_offset(point(px(0.), -line_height * 50.), cx);
+            });
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let first = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| {
+                input.read_with(cx, |state, _| {
+                    state.last_layout.as_ref().unwrap().visible_buffer_lines[0]
+                })
+            })
+        };
+        let before = first(&mut cx);
+        assert!(before > 10, "scrolled well past the block: {before}");
+
+        let total = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| input.read_with(cx, |state, _| state.display_map.total_height()))
+        };
+        let total_before = total(&mut cx);
+        scale.set(10.0);
+        cx.update(|_, cx| {
+            input.update(cx, |state, cx| state.rewrap_lines_anchored(7..13, cx));
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(total(&mut cx) - total_before, 9.0, "the block did grow");
+        assert_eq!(first(&mut cx), before, "the view did not move");
     }
 
     /// A highlighter that hides byte ranges and scales one line, for the

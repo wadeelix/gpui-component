@@ -176,7 +176,10 @@ fn normalize_scale(scale: f32) -> f32 {
 }
 
 /// Ceiling for one line's height, in base line heights.
-const MAX_HEIGHT_SCALE: f32 = 8.0;
+/// Tall enough for a block an application draws in place of a line -- an
+/// image, an embedded note (ADR-0009) -- at about 1 600 px on the default
+/// size; 8 was sized for headings and tables and fit no image.
+const MAX_HEIGHT_SCALE: f32 = 64.0;
 
 /// Cursor dimension accumulating height, in base line heights.
 ///
@@ -923,6 +926,8 @@ pub(crate) struct LineLayout {
     pub(crate) height_scale: f32,
     /// Widgets drawn over this line, with ranges relative to the line start.
     pub(crate) widgets: Vec<crate::input::InlineWidget>,
+    /// The block drawn in place of this line, if the application asked for one.
+    pub(crate) block: Option<crate::input::BlockWidget>,
     /// Set when this line is a table row laid out per cell; every geometry
     /// question is then answered by it.
     pub(crate) table: Option<Box<crate::input::table_layout::TableRowLayout>>,
@@ -939,6 +944,7 @@ impl LineLayout {
         Self {
             height_scale: 1.0,
             widgets: Vec::new(),
+            block: None,
             display_len: 0,
             concealed: Vec::new(),
             longest_width: px(0.),
@@ -953,6 +959,11 @@ impl LineLayout {
     }
 
     /// Sets the slab this line sits on.
+    pub(crate) fn with_block(mut self, block: Option<crate::input::BlockWidget>) -> Self {
+        self.block = block;
+        self
+    }
+
     pub(crate) fn with_decoration(
         mut self,
         decoration: Option<crate::input::LineDecoration>,

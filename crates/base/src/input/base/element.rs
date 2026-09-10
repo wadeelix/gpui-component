@@ -1683,6 +1683,60 @@ impl<M: InputModeKind> TextElement<M> {
         out
     }
 
+    /// Lays out the blocks of the visible lines (ADR-0009): each over its
+    /// line, the text column's width and the height the line was given,
+    /// through the renderer the application registered. Their bounds join the
+    /// widget hitboxes, so a click inside one is the block's, not the caret's.
+    fn layout_block_widgets(
+        &self,
+        bounds: &Bounds<Pixels>,
+        last_layout: &LastLayout,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Vec<gpui::AnyElement> {
+        let Some(renderer) = self.state.read(cx).block_renderer.clone() else {
+            return Vec::new();
+        };
+        let line_height = last_layout.line_height;
+        let width = last_layout
+            .wrap_width
+            .unwrap_or(last_layout.content_width)
+            .max(px(0.));
+        let mut out = Vec::new();
+        let mut hitboxes = Vec::new();
+        let mut offset_y = last_layout.visible_top;
+        for (vi, line) in last_layout.lines.iter().enumerate() {
+            let height = line.size(line_height).height;
+            if let Some(block) = &line.block {
+                let line_start = last_layout
+                    .visible_line_byte_offsets
+                    .get(vi)
+                    .copied()
+                    .unwrap_or(0);
+                let origin = point(
+                    bounds.origin.x + last_layout.line_number_width,
+                    bounds.origin.y + offset_y,
+                );
+                let size = gpui::size(width, height);
+                let context = crate::input::BlockContext {
+                    range: line_start..line_start + line.len(),
+                    size,
+                };
+                let mut element = renderer(block, &context, window, cx);
+                element.prepaint_as_root(origin, size.into(), window, cx);
+                hitboxes.push(Bounds { origin, size });
+                out.push(element);
+            }
+            offset_y += height;
+        }
+        self.state
+            .read(cx)
+            .widget_hitboxes
+            .borrow_mut()
+            .extend(hitboxes);
+        out
+    }
+
     fn paint_fold_icons(
         &mut self,
         fold_icon_layout: &mut FoldIconLayout,
@@ -1793,6 +1847,7 @@ impl<M: InputModeKind> TextElement<M> {
             let decoration = highlighter.and_then(|h| {
                 h.line_decoration(&line_range, state.editor_style.highlight_styles.as_ref())
             });
+            let block = highlighter.and_then(|h| h.block_widget(&line_range));
             let (concealed, line_font_size, widgets) = match highlighter {
                 Some(highlighter) => {
                     let concealed =
@@ -1888,6 +1943,7 @@ impl<M: InputModeKind> TextElement<M> {
                 .lines(wrapped_lines)
                 .with_height_scale(state.display_map.line_height_scale(buffer_line))
                 .with_widgets(widgets)
+                .with_block(block)
                 .with_concealed(concealed)
                 .with_decoration(decoration);
 
@@ -2272,6 +2328,8 @@ pub(super) struct PrepaintState {
     current_row: Option<usize>,
     /// Prepainted inline widgets, drawn over the text they stand for.
     inline_widgets: Vec<InlineWidgetLayout>,
+    /// Prepainted blocks, drawn over the lines they stand for (ADR-0009).
+    block_widgets: Vec<gpui::AnyElement>,
     selection_paths: Vec<Path<Pixels>>,
     hover_highlight_path: Option<Path<Pixels>>,
     search_match_paths: Vec<(Path<Pixels>, bool)>,
@@ -2774,12 +2832,16 @@ impl<M: InputModeKind> Element for TextElement<M> {
         let fold_icon_layout =
             self.layout_fold_icons(original_x, &bounds, &last_layout, window, cx);
         let inline_widgets = self.layout_inline_widgets(&bounds, &last_layout, window, cx);
+        // After the inline widgets, which replace the hitboxes; the marker
+        // adds its own after these.
+        let block_widgets = self.layout_block_widgets(&bounds, &last_layout, window, cx);
         let table_marker = self.layout_table_marker(window, cx);
 
         PrepaintState {
             bounds,
             last_layout,
             inline_widgets,
+            block_widgets,
             scroll_size,
             line_numbers,
             cursor_infos,
@@ -3149,6 +3211,9 @@ impl<M: InputModeKind> Element for TextElement<M> {
         // editor took it and moved the caret instead.
         for widget in prepaint.inline_widgets.iter_mut() {
             widget.element.paint(window, cx);
+        }
+        for block in prepaint.block_widgets.iter_mut() {
+            block.paint(window, cx);
         }
         if let Some(marker) = prepaint.table_marker.as_mut() {
             marker.paint(window, cx);

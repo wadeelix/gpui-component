@@ -133,6 +133,23 @@ pub trait InputHighlighter {
         Vec::new()
     }
 
+    /// A block drawn in place of the buffer line covering `line_range`: an
+    /// image, an embedded note (ADR-0009).
+    ///
+    /// The engine reserves no height of its own for a block. Give the line
+    /// its height from `line_height_scale` and hide its text from `conceals`,
+    /// which keeps the caret-line rule in one place; the engine lays the
+    /// element out over the line and routes clicks inside it to the element.
+    ///
+    /// Queried once per visible line on every layout, so it must be as cheap
+    /// as `inline_widgets`.
+    ///
+    /// Default: no block.
+    fn block_widget(&self, line_range: &Range<usize>) -> Option<BlockWidget> {
+        let _ = line_range;
+        None
+    }
+
     /// Extra height for the buffer line covering `line_range`, as a multiple of
     /// the base line height, on top of what `line_font_scale` already implies.
     ///
@@ -227,6 +244,47 @@ pub enum InlineWidgetKind {
     /// so a note looks the same while it is being edited and once it is read.
     Checkbox { mark: crate::text::TaskMark },
 }
+
+/// A block the application draws in place of a whole buffer line
+/// (ADR-0009). See [`InputHighlighter::block_widget`].
+#[derive(Clone)]
+pub struct BlockWidget {
+    /// Names the block across frames, for the application's own state.
+    pub id: SharedString,
+    /// What the application's renderer draws from.
+    pub data: Rc<dyn std::any::Any>,
+}
+
+impl PartialEq for BlockWidget {
+    /// Two blocks with one id are one block.
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl std::fmt::Debug for BlockWidget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BlockWidget")
+            .field("id", &self.id)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Where a block is drawn, as its renderer is told.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BlockContext {
+    /// The buffer range of the line the block stands for.
+    pub range: Range<usize>,
+    /// The room reserved for it: the text column's width and the line's
+    /// height.
+    pub size: gpui::Size<gpui::Pixels>,
+}
+
+/// Draws a block. Registered once on the editor state and called for visible
+/// blocks only, during the editor's prepaint, so it must draw what is ready
+/// and leave anything slow to the background.
+pub type BlockRenderer =
+    Rc<dyn Fn(&BlockWidget, &BlockContext, &mut Window, &mut gpui::App) -> AnyElement>;
 
 /// One row of a GFM pipe table, as the application segments it for the
 /// engine (see [`InputHighlighter::table_row`]).
