@@ -51,7 +51,10 @@ fn diagnostic_highlight_style(
 }
 
 const BOTTOM_MARGIN_ROWS: usize = 3;
-pub(super) const RIGHT_MARGIN: Pixels = px(10.);
+/// Room kept to the right of the text, which is also where the editor paints
+/// its scrollbar: at less than the bar's width the last words of a wrapped
+/// line sit underneath it, unreadable exactly while the note is scrolled.
+pub(super) const RIGHT_MARGIN: Pixels = Scrollbar::width();
 pub(super) const LINE_NUMBER_RIGHT_MARGIN: Pixels = px(10.);
 const FOLD_ICON_WIDTH: Pixels = px(14.);
 const FOLD_ICON_HITBOX_WIDTH: Pixels = px(18.);
@@ -3661,7 +3664,13 @@ mod tests {
             layout.bounds,
             Bounds::new(point(px(47.), px(18.)), size(px(266.), px(87.)))
         );
-        assert_eq!(layout.scroll_size, size(px(976.), px(200.)));
+        // Expressed in terms of the margin rather than a number: it is the
+        // scrollbar's width, so a change there must not silently shrink the
+        // scrollable area.
+        assert_eq!(
+            layout.scroll_size,
+            size(px(966.) + RIGHT_MARGIN, px(200.))
+        );
 
         let layout_without_gutter =
             EditorScrollbarLayout::new(input_bounds, px(0.), size(px(500.), px(120.)), paddings);
@@ -3670,7 +3679,10 @@ mod tests {
             layout_without_gutter.bounds,
             Bounds::new(point(px(10.), px(18.)), size(px(303.), px(87.)))
         );
-        assert_eq!(layout_without_gutter.scroll_size, size(px(513.), px(120.)));
+        assert_eq!(
+            layout_without_gutter.scroll_size,
+            size(px(503.) + RIGHT_MARGIN, px(120.))
+        );
     }
 
     #[test]
