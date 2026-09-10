@@ -253,6 +253,12 @@ where
             x: axis.has_horizontal().then_some(Overflow::Hidden),
             y: axis.has_vertical().then_some(Overflow::Hidden),
         },
+        // Where the caller put it. The wrapper is what lands in the parent, so
+        // a scrollable that floats -- a settings sheet over a canvas, a
+        // popover -- would otherwise be laid out in the flow instead, at the
+        // full width of whatever contains it.
+        position: style.position,
+        inset: style.inset.clone(),
         ..Default::default()
     }
 }
