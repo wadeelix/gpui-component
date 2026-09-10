@@ -397,6 +397,9 @@ pub struct InputBaseState<M: InputModeKind> {
     pub(super) widget_hitboxes: RefCell<Vec<Bounds<Pixels>>>,
     /// Draws the blocks a highlighter asks for (ADR-0009).
     pub(crate) block_renderer: Option<crate::input::BlockRenderer>,
+    /// Fold candidates to fold, by first line, once the highlighter gives
+    /// its candidates: see [`Self::fold_when_ready`].
+    pending_folds: Vec<usize>,
     /// The table insertion marker the pointer is near, if any.
     pub(crate) table_marker: Option<TableMarker>,
     /// Whether tables offer insertion markers under the pointer at all.
@@ -724,6 +727,7 @@ impl<M: InputModeKind> InputBaseState<M> {
             editor_scrollbar_snapshot: Cell::new(None),
             widget_hitboxes: RefCell::new(Vec::new()),
             block_renderer: None,
+            pending_folds: Vec::new(),
             table_marker: None,
             table_handles: true,
             editor_paddings: Edges::default(),
@@ -986,6 +990,7 @@ impl<M: InputModeKind> InputBaseState<M> {
     ) {
         if self.mode.is_folding() {
             self.display_map.set_fold_candidates(candidates);
+            self.apply_pending_folds();
         }
         cx.notify();
     }
@@ -3690,13 +3695,27 @@ impl<M: InputModeKind> InputBaseState<M> {
             return;
         };
 
-        let highlighter = highlighter_rc.borrow();
-        let Some(highlighter) = highlighter.as_ref() else {
-            return;
+        // The highlighter's borrow ends here: folding what is pending needs
+        // the whole state.
+        let fold_ranges = {
+            let highlighter = highlighter_rc.borrow();
+            let Some(highlighter) = highlighter.as_ref() else {
+                return;
+            };
+            highlighter.fold_ranges(&self.text)
         };
-
-        let fold_ranges = highlighter.fold_ranges(&self.text);
         self.display_map.set_fold_candidates(fold_ranges);
+        self.apply_pending_folds();
+    }
+
+    /// Folds what [`Self::fold_when_ready`] asked for, now that candidates
+    /// exist; a line that starts no candidate is dropped.
+    fn apply_pending_folds(&mut self) {
+        for start_line in std::mem::take(&mut self.pending_folds) {
+            if self.display_map.is_fold_candidate(start_line) {
+                self.display_map.set_folded(start_line, true);
+            }
+        }
     }
 
     /// Incrementally update fold candidates after a text edit.
@@ -6211,6 +6230,58 @@ mod tests {
                 state.undo(&Undo, window, cx);
                 state.redo(&Redo, window, cx);
                 assert_eq!(state.selected_range(), selection_after_edit);
+            });
+        });
+    }
+
+    /// A fold candidate folds and unfolds by its first line; a line that
+    /// starts no candidate is left alone.
+    #[gpui::test]
+    fn test_set_folded_acts_on_candidates_only(cx: &mut TestAppContext) {
+        use crate::input::FoldRange;
+
+        let view = InputView::<EditorMode>::new(cx);
+        let mut cx = VisualTestContext::from_window(view.window_handle.into(), cx);
+        let input = view.input;
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.set_value("a\nb\nc\nd\ne", window, cx);
+                state.apply_highlighter_fold_candidates(vec![FoldRange::new(0, 3)], cx);
+                assert!(state.set_folded(0, true, cx));
+                assert!(state.display_map.is_folded_at(0));
+                assert!(state.display_map.is_buffer_line_hidden(1));
+                assert!(!state.set_folded(1, true, cx), "line 1 starts no candidate");
+                assert!(state.is_folded_at(0));
+                assert!(state.set_folded(0, false, cx));
+                assert!(!state.is_folded_at(0));
+            });
+        });
+    }
+
+    /// Folds asked for before the highlighter has given candidates are made
+    /// once it does; a line that starts no candidate is dropped.
+    #[gpui::test]
+    fn test_fold_when_ready_waits_for_candidates(cx: &mut TestAppContext) {
+        use crate::input::FoldRange;
+
+        let view = InputView::<EditorMode>::new(cx);
+        let mut cx = VisualTestContext::from_window(view.window_handle.into(), cx);
+        let input = view.input;
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.set_value("a\nb\nc\nd\ne\nf", window, cx);
+                state.fold_when_ready(vec![0, 4]);
+                assert!(!state.is_folded_at(0), "no candidates yet");
+                state.apply_highlighter_fold_candidates(
+                    vec![FoldRange::new(0, 3), FoldRange::new(3, 5)],
+                    cx,
+                );
+                assert!(state.is_folded_at(0));
+                assert!(!state.is_folded_at(3), "not asked for");
+                assert!(!state.is_folded_at(4), "starts no candidate");
+                state.set_folded(0, false, cx);
+                state.apply_highlighter_fold_candidates(vec![FoldRange::new(0, 3)], cx);
+                assert!(!state.is_folded_at(0), "asked for once");
             });
         });
     }
@@ -9325,6 +9396,35 @@ impl InputBaseState<crate::input::EditorMode> {
         }
         cx.notify();
         true
+    }
+
+    /// Folds or unfolds the fold candidate that starts at buffer line
+    /// `start_line`, as a click on its gutter icon does; a line that starts
+    /// no candidate is left alone. Returns whether it started one.
+    ///
+    /// Candidates come from the highlighter, so a caller folding a document
+    /// it has just opened does so once the candidates exist.
+    pub fn set_folded(&mut self, start_line: usize, folded: bool, cx: &mut Context<Self>) -> bool {
+        if !self.display_map.is_fold_candidate(start_line) {
+            return false;
+        }
+        self.display_map.set_folded(start_line, folded);
+        cx.notify();
+        true
+    }
+
+    /// Folds the candidates starting at these buffer lines as soon as the
+    /// highlighter has given its candidates -- for folds a document opens
+    /// with, which cannot be set before its first highlight. Lines that then
+    /// start no candidate are dropped.
+    pub fn fold_when_ready(&mut self, start_lines: Vec<usize>) {
+        self.pending_folds = start_lines;
+    }
+
+    /// Whether the fold candidate starting at buffer line `start_line` is
+    /// folded.
+    pub fn is_folded_at(&self, start_line: usize) -> bool {
+        self.display_map.is_folded_at(start_line)
     }
 
     /// Set enable/disable line number.
