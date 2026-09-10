@@ -1363,17 +1363,20 @@ impl CodeBlock {
                     .text_size(cx.theme().tokens.typography.mono_md.size)
                     .relative()
                     .refine_style(&style.code_block())
-                    .child(Inline::new(
-                        "code",
-                        self.state.clone(),
-                        vec![],
-                        node_cx
-                            .code_block_highlighter
-                            .as_ref()
-                            .map(|highlighter| self.highlighted_styles(highlighter))
-                            .unwrap_or_default(),
-                        node_cx.link_click_handler.clone(),
-                    ))
+                    .child(
+                        Inline::new(
+                            "code",
+                            self.state.clone(),
+                            vec![],
+                            node_cx
+                                .code_block_highlighter
+                                .as_ref()
+                                .map(|highlighter| self.highlighted_styles(highlighter))
+                                .unwrap_or_default(),
+                            node_cx.link_click_handler.clone(),
+                        )
+                        .link_hover_handler(node_cx.link_hover_handler.clone()),
+                    )
                     .when_some(node_cx.code_block_actions.clone(), |this, actions| {
                         this.child(
                             div()
@@ -1403,6 +1406,7 @@ pub(crate) struct NodeContext {
     pub(crate) code_block_highlighter: Option<Arc<CodeBlockHighlighterFn>>,
     pub(crate) table_actions: Option<Arc<TableActionsFn>>,
     pub(crate) link_click_handler: Option<Arc<LinkClickHandlerFn>>,
+    pub(crate) link_hover_handler: Option<Arc<crate::text::text_view::LinkHoverHandlerFn>>,
     pub(crate) markdown_extensions: Arc<MarkdownExtensions>,
 }
 
@@ -1431,6 +1435,7 @@ impl Paragraph {
                 self.inline_flow_items(node_cx, cx),
                 node_cx.link_click_handler.clone(),
             )
+            .link_hover_handler(node_cx.link_hover_handler.clone())
             .into_any_element();
         }
 
@@ -1459,6 +1464,7 @@ impl Paragraph {
                             highlights.clone(),
                             node_cx.link_click_handler.clone(),
                         )
+                        .link_hover_handler(node_cx.link_hover_handler.clone())
                         .into_any_element(),
                     );
                 }
@@ -1574,6 +1580,7 @@ impl Paragraph {
                     highlights,
                     node_cx.link_click_handler.clone(),
                 )
+                .link_hover_handler(node_cx.link_hover_handler.clone())
                 .into_any_element(),
             );
         }

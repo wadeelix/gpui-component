@@ -19,7 +19,7 @@ use crate::{
     text::node::LinkMark,
     text::selection::word_range_at,
     text::state::LineSpan,
-    text::text_view::{LinkClickHandlerFn, handle_link_click},
+    text::text_view::{LinkClickHandlerFn, LinkHoverHandlerFn, handle_link_click},
 };
 
 /// A inline element used to render a inline text and support selectable.
@@ -32,6 +32,7 @@ pub(super) struct Inline {
     highlights: Vec<(Range<usize>, HighlightStyle)>,
     styled_text: StyledText,
     link_click_handler: Option<Arc<LinkClickHandlerFn>>,
+    link_hover_handler: Option<Arc<LinkHoverHandlerFn>>,
 
     state: Arc<Mutex<InlineState>>,
 }
@@ -40,6 +41,8 @@ pub(super) struct Inline {
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct InlineState {
     hovered_index: Option<usize>,
+    /// The link the hover handler was last told the pointer is over.
+    hovered_link: Option<SharedString>,
     /// The text that actually rendering, matched with selection.
     pub(super) text: SharedString,
     pub(super) selection: Option<Selection>,
@@ -72,8 +75,14 @@ impl Inline {
             text: text.clone(),
             styled_text: StyledText::new(text),
             link_click_handler,
+            link_hover_handler: None,
             state,
         }
+    }
+
+    pub(super) fn link_hover_handler(mut self, handler: Option<Arc<LinkHoverHandlerFn>>) -> Self {
+        self.link_hover_handler = handler;
+        self
     }
 
     /// Get link at given mouse position.
@@ -540,6 +549,33 @@ impl Element for Inline {
                 }
             }
         });
+
+        // Tell the view which link the pointer is over: on every move over one,
+        // and once when it leaves, so a caller can time a preview.
+        if let Some(handler) = self.link_hover_handler.clone() {
+            window.on_mouse_event({
+                let hitbox = hitbox.clone();
+                let text_layout = text_layout.clone();
+                let links = self.links.clone();
+                let inline_state = self.state.clone();
+                move |event: &MouseMoveEvent, phase, window, cx| {
+                    if !phase.bubble() {
+                        return;
+                    }
+                    let link = hitbox
+                        .is_hovered(window)
+                        .then(|| Self::link_for_position(&text_layout, &links, event.position))
+                        .flatten()
+                        .map(|link| link.url);
+                    let was = inline_state.lock().ok().and_then(|mut state| {
+                        std::mem::replace(&mut state.hovered_link, link.clone())
+                    });
+                    if link.is_some() || was.is_some() {
+                        handler(link.as_ref(), event, window, cx);
+                    }
+                }
+            });
+        }
 
         if !is_selection {
             // click to open link

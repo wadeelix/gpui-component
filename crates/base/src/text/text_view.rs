@@ -73,6 +73,11 @@ impl TextViewDefaults {
 pub(crate) type TableActionsFn =
     dyn Fn(&TableData, &mut Window, &mut App) -> AnyElement + Send + Sync;
 
+/// Handler for the link under the pointer: its URL on every move over it,
+/// and `None` once when the pointer leaves it.
+pub(crate) type LinkHoverHandlerFn =
+    dyn Fn(Option<&SharedString>, &gpui::MouseMoveEvent, &mut Window, &mut App) + Send + Sync;
+
 pub(crate) type LinkClickHandlerFn =
     dyn Fn(&SharedString, &ClickEvent, &mut Window, &mut App) + Send + Sync;
 
@@ -128,6 +133,7 @@ pub struct TextView {
     code_block_highlighter: Option<Arc<CodeBlockHighlighterFn>>,
     table_actions: Option<Arc<TableActionsFn>>,
     link_click_handler: Option<Arc<LinkClickHandlerFn>>,
+    link_hover_handler: Option<Arc<LinkHoverHandlerFn>>,
     markdown_extensions: Arc<MarkdownExtensions>,
 }
 
@@ -172,6 +178,7 @@ impl TextView {
             code_block_highlighter: None,
             table_actions: None,
             link_click_handler: None,
+            link_hover_handler: None,
             markdown_extensions: Arc::default(),
         }
     }
@@ -193,6 +200,7 @@ impl TextView {
             code_block_highlighter: None,
             table_actions: None,
             link_click_handler: None,
+            link_hover_handler: None,
             markdown_extensions: Arc::default(),
         }
     }
@@ -214,6 +222,7 @@ impl TextView {
             code_block_highlighter: None,
             table_actions: None,
             link_click_handler: None,
+            link_hover_handler: None,
             markdown_extensions: Arc::default(),
         }
     }
@@ -330,6 +339,20 @@ impl TextView {
         F: Fn(&SharedString, &ClickEvent, &mut Window, &mut App) + Send + Sync + 'static,
     {
         self.link_click_handler = Some(Arc::new(handler));
+        self
+    }
+
+    /// Handle the pointer over rendered links: called with the link's URL on
+    /// every move over one, and with `None` once the pointer leaves it -- so
+    /// a caller can time a preview while the pointer rests.
+    pub fn on_link_hover<F>(mut self, handler: F) -> Self
+    where
+        F: Fn(Option<&SharedString>, &gpui::MouseMoveEvent, &mut Window, &mut App)
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.link_hover_handler = Some(Arc::new(handler));
         self
     }
 
@@ -561,6 +584,7 @@ impl Element for TextView {
             state.code_block_highlighter = code_block_highlighter.clone();
             state.table_actions = self.table_actions.clone();
             state.link_click_handler = self.link_click_handler.clone();
+            state.link_hover_handler = self.link_hover_handler.clone();
             state.set_markdown_extensions(self.markdown_extensions.clone(), cx);
             state.selectable = self.selectable;
             state.selection_format = self.selection_format;
@@ -1558,6 +1582,67 @@ mod tests {
         assert!(clicks[1].1.is_middle_click());
         assert!(clicks[2].1.is_right_click());
         assert_eq!(cx.opened_url(), None);
+    }
+
+    #[gpui::test]
+    fn link_hover_handler_follows_the_pointer_over_a_link(cx: &mut TestAppContext) {
+        use std::sync::{Arc, Mutex};
+
+        type Hovers = Arc<Mutex<Vec<(Option<SharedString>, bool)>>>;
+
+        struct HoverRoot {
+            text_view: Entity<TextViewState>,
+            hovers: Hovers,
+        }
+
+        impl Render for HoverRoot {
+            fn render(
+                &mut self,
+                _window: &mut Window,
+                _cx: &mut Context<Self>,
+            ) -> impl IntoElement {
+                let hovers = self.hovers.clone();
+                div()
+                    .w(px(240.))
+                    .h(px(200.))
+                    .child(
+                        TextView::new(&self.text_view).on_link_hover(move |url, event, _, _| {
+                            hovers
+                                .lock()
+                                .unwrap()
+                                .push((url.cloned(), event.modifiers.control));
+                        }),
+                    )
+            }
+        }
+
+        cx.update(crate::init);
+        let hovers: Hovers = Arc::new(Mutex::new(Vec::new()));
+        let captured = hovers.clone();
+        let (_, cx) = cx.add_window_view(move |_, cx| HoverRoot {
+            text_view: cx.new(|cx| {
+                TextViewState::markdown("[example](https://example.com) and words after it", cx)
+            }),
+            hovers,
+        });
+        let cx: &mut VisualTestContext = cx;
+
+        let mut control = Modifiers::default();
+        control.control = true;
+        cx.simulate_mouse_move(point(px(10.), px(10.)), None, control);
+        cx.simulate_mouse_move(point(px(12.), px(10.)), None, control);
+        cx.simulate_mouse_move(point(px(10.), px(150.)), None, Modifiers::default());
+        cx.simulate_mouse_move(point(px(10.), px(160.)), None, Modifiers::default());
+
+        let hovers = captured.lock().unwrap();
+        assert_eq!(hovers.len(), 3, "{hovers:?}");
+        assert_eq!(hovers[0], (Some("https://example.com".into()), true));
+        assert_eq!(
+            hovers[1].0.as_deref(),
+            Some("https://example.com"),
+            "every move"
+        );
+        assert_eq!(hovers[2], (None, false), "once when the pointer leaves");
     }
 
     #[gpui::test]

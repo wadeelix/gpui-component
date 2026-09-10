@@ -25,6 +25,7 @@ pub(super) struct InlineFlow {
     id: ElementId,
     items: Vec<InlineFlowItem>,
     link_click_handler: Option<Arc<LinkClickHandlerFn>>,
+    link_hover_handler: Option<Arc<crate::text::text_view::LinkHoverHandlerFn>>,
 }
 
 pub(super) enum InlineFlowItem {
@@ -111,7 +112,16 @@ impl InlineFlow {
             id: id.into(),
             items,
             link_click_handler,
+            link_hover_handler: None,
         }
+    }
+
+    pub(super) fn link_hover_handler(
+        mut self,
+        handler: Option<Arc<crate::text::text_view::LinkHoverHandlerFn>>,
+    ) -> Self {
+        self.link_hover_handler = handler;
+        self
     }
 
     fn image_element(
@@ -286,6 +296,7 @@ impl Element for InlineFlow {
                         highlights,
                         self.link_click_handler.clone(),
                     )
+                    .link_hover_handler(self.link_hover_handler.clone())
                     .into_any_element();
                     element.prepaint_as_root(
                         bounds.origin + origin,
