@@ -3,6 +3,8 @@ use std::{ops::Range, sync::Arc};
 use gpui::SharedString;
 use markdown::mdast::{self, Node};
 
+use crate::text::markdown_ext::SoftBreaks;
+
 use crate::text::{
     document::ParsedDocument,
     markdown_ext::MarkdownParseContext,
@@ -313,7 +315,18 @@ fn parse_paragraph(paragraph: &mut Paragraph, node: &mdast::Node, cx: &mut NodeC
             // so a CRLF document still carries its carriage return here. Take
             // the CR with the newline: dropping only the newline would strand
             // the CR in the middle of the reflowed line.
-            text = val.value.replace("\r\n", " ").replace(['\n', '\r'], " ");
+            //
+            // Unless the view asked for soft breaks to *break* (Obsidian's
+            // default): then every line ending becomes the one newline the
+            // renderer draws as a line break.
+            let ending = match cx.markdown_extensions.soft_break_mode() {
+                SoftBreaks::Reflow => " ",
+                SoftBreaks::Break => "\n",
+            };
+            text = val
+                .value
+                .replace("\r\n", ending)
+                .replace(['\n', '\r'], ending);
             paragraph.push_str(&text)
         }
         Node::Emphasis(val) => {
@@ -747,7 +760,7 @@ mod tests {
     use super::*;
     use gpui::ParentElement;
 
-    use crate::text::{MarkdownExtensions, MarkdownNode, MarkdownPlugin};
+    use crate::text::{MarkdownExtensions, MarkdownNode, MarkdownPlugin, markdown_ext::SoftBreaks};
 
     /// The three boxes CommonMark does not parse are read off the source, and
     /// their brackets leave the rendered text so the box is not drawn twice.
@@ -904,6 +917,33 @@ mod tests {
             assert_eq!(
                 paragraph.children[0].text.as_ref(),
                 "this sentence continues as a soft wrap",
+                "source: {source:?}"
+            );
+        }
+    }
+
+    /// Asked to break rather than reflow, a soft break is the newline the
+    /// renderer draws as a line break, whatever the source's line ending was.
+    #[test]
+    fn test_soft_break_breaks_when_asked_to() {
+        for source in [
+            "one line\nthe next",
+            "one line\r\nthe next",
+            "one line\rthe next",
+        ] {
+            let mut cx = NodeContext {
+                markdown_extensions: std::sync::Arc::new(
+                    MarkdownExtensions::default().soft_breaks(SoftBreaks::Break),
+                ),
+                ..NodeContext::default()
+            };
+            let document = parse(source, &mut cx).unwrap();
+            let BlockNode::Paragraph(paragraph) = &document.blocks[0] else {
+                panic!("expected paragraph");
+            };
+            assert_eq!(
+                paragraph.children[0].text.as_ref(),
+                "one line\nthe next",
                 "source: {source:?}"
             );
         }

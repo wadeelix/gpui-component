@@ -10,7 +10,7 @@ use gpui::{
 
 use crate::StyledExt;
 use crate::text::TextViewFormat;
-use crate::text::markdown_ext::{MarkdownExtensions, MarkdownNode, MarkdownPlugin};
+use crate::text::markdown_ext::{MarkdownExtensions, MarkdownNode, MarkdownPlugin, SoftBreaks};
 use crate::text::node::{CodeBlock, TableData};
 use crate::text::state::{LineSpan, SelectionFormat, TextViewState};
 use crate::{GlobalState, TextSelection, text::TextViewStyle};
@@ -376,6 +376,14 @@ impl TextView {
     pub fn markdown_highlights(mut self, color: gpui::Hsla) -> Self {
         let extensions = Arc::make_mut(&mut self.markdown_extensions);
         *extensions = extensions.clone().highlights(color);
+        self
+    }
+
+    /// What a bare line ending inside a paragraph becomes: a space, as
+    /// CommonMark has it, or a line break ([`SoftBreaks`]).
+    pub fn markdown_soft_breaks(mut self, soft_breaks: SoftBreaks) -> Self {
+        let extensions = Arc::make_mut(&mut self.markdown_extensions);
+        *extensions = extensions.clone().soft_breaks(soft_breaks);
         self
     }
 

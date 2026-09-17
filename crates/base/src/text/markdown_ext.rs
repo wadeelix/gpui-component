@@ -172,12 +172,29 @@ impl PartialEq for MarkdownNode {
     }
 }
 
+/// What a bare line ending inside a paragraph becomes.
+///
+/// CommonMark calls it a soft break and renders it as a space, so prose
+/// hard-wrapped in the source reflows to the available width. Obsidian's
+/// default ("strict line breaks" off) shows it as a line break instead, and a
+/// writer who breaks lines by hand expects that. The default here is
+/// CommonMark's.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SoftBreaks {
+    /// A soft break is a space: the paragraph reflows (CommonMark).
+    #[default]
+    Reflow,
+    /// A soft break is a line break: one visual line per source line.
+    Break,
+}
+
 /// Registry for custom Markdown parsing and rendering.
 #[derive(Clone, Default)]
 pub struct MarkdownExtensions {
     enable_mdx: bool,
     /// Background of Obsidian's `==highlight==`; `None` leaves `==` as text.
     highlight: Option<gpui::Hsla>,
+    soft_breaks: SoftBreaks,
     block_parsers: Vec<Arc<MarkdownBlockParserFn>>,
     block_renderers: HashMap<SharedString, Arc<MarkdownBlockRenderFn>>,
     revision: u64,
@@ -203,6 +220,17 @@ impl MarkdownExtensions {
 
     pub(crate) fn highlight_color(&self) -> Option<gpui::Hsla> {
         self.highlight
+    }
+
+    /// What a bare line ending inside a paragraph becomes; see [`SoftBreaks`].
+    pub fn soft_breaks(mut self, soft_breaks: SoftBreaks) -> Self {
+        self.soft_breaks = soft_breaks;
+        self.bump_revision();
+        self
+    }
+
+    pub(crate) fn soft_break_mode(&self) -> SoftBreaks {
+        self.soft_breaks
     }
 
     /// Register a parser for block-level Markdown AST nodes.
@@ -260,6 +288,7 @@ impl MarkdownExtensions {
     pub(crate) fn has_same_parser_configuration(&self, other: &Self) -> bool {
         self.enable_mdx == other.enable_mdx
             && self.highlight == other.highlight
+            && self.soft_breaks == other.soft_breaks
             && self.block_parsers.len() == other.block_parsers.len()
             && self.block_renderers.len() == other.block_renderers.len()
             && self

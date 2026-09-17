@@ -8,8 +8,8 @@ pub use compat::{
 };
 pub use gpui_base::text::{
     MarkdownBlockParserFn, MarkdownBlockRenderFn, MarkdownExtensions, MarkdownNode,
-    MarkdownParseContext, MarkdownPlugin, SelectionFormat, TableData, TaskMark, TextViewState,
-    markdown_ast,
+    MarkdownParseContext, MarkdownPlugin, SelectionFormat, SoftBreaks, TableData, TaskMark,
+    TextViewState, markdown_ast,
 };
 pub use style::TextViewStyle;
 
