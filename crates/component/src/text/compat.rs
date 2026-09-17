@@ -6,7 +6,7 @@ use gpui::{
 
 use super::{
     MarkdownExtensions, MarkdownNode, MarkdownParseContext, MarkdownPlugin, SelectionFormat,
-    TableData, TextViewState, TextViewStyle,
+    SoftBreaks, TableData, TextViewState, TextViewStyle,
 };
 use gpui_base::text::CodeBlock;
 
@@ -132,6 +132,11 @@ impl TextView {
     /// Highlights `==text==` on `color`, as Obsidian does.
     pub fn markdown_highlights(mut self, color: gpui::Hsla) -> Self {
         self.inner = self.inner.markdown_highlights(color);
+        self
+    }
+    /// What a bare line ending inside a paragraph becomes ([`SoftBreaks`]).
+    pub fn markdown_soft_breaks(mut self, soft_breaks: SoftBreaks) -> Self {
+        self.inner = self.inner.markdown_soft_breaks(soft_breaks);
         self
     }
     /// Parses custom block nodes out of the Markdown AST.
