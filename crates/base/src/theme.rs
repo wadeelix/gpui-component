@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use gpui::{App, Global};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -24,9 +26,33 @@ pub struct Theme {
 
 impl Global for Theme {}
 
+/// Themes standing in for the global one while a part of the window is
+/// built, laid out and painted; the last one pushed is current.
+#[derive(Default)]
+struct ThemeScopes(Vec<Rc<Theme>>);
+
+impl Global for ThemeScopes {}
+
 impl Theme {
+    /// The theme current here: the innermost scoped one, else the global.
     pub fn global(cx: &App) -> Self {
+        if let Some(theme) = cx.try_global::<ThemeScopes>().and_then(|s| s.0.last()) {
+            return Theme::clone(theme);
+        }
         cx.try_global::<Self>().cloned().unwrap_or_default()
+    }
+
+    /// Makes `theme` the one [`Theme::global`] answers until the matching
+    /// [`Theme::pop_scope`]. Scopes nest.
+    pub fn push_scope(theme: Rc<Theme>, cx: &mut App) {
+        cx.default_global::<ThemeScopes>().0.push(theme);
+    }
+
+    /// Ends the innermost scope opened by [`Theme::push_scope`].
+    pub fn pop_scope(cx: &mut App) {
+        if cx.has_global::<ThemeScopes>() {
+            cx.global_mut::<ThemeScopes>().0.pop();
+        }
     }
 
     pub fn global_mut(cx: &mut App) -> &mut Self {

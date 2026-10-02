@@ -24,6 +24,7 @@ mod mono_font;
 mod motion;
 mod registry;
 mod schema;
+mod scope;
 mod system_font;
 mod theme_color;
 
@@ -31,6 +32,7 @@ pub use color::*;
 pub use motion::*;
 pub use registry::*;
 pub use schema::*;
+pub use scope::*;
 pub use theme_color::*;
 
 pub fn init(cx: &mut App) {
@@ -214,10 +216,17 @@ impl DerefMut for Theme {
 impl Global for Theme {}
 
 impl Theme {
-    /// Returns the global theme reference
+    /// Returns the theme current here: the innermost [`ScopedTheme`] being
+    /// built or drawn, else the global theme.
     #[inline(always)]
     pub fn global(cx: &App) -> &Theme {
-        cx.global::<Theme>()
+        match cx
+            .try_global::<scope::ThemeScopes>()
+            .and_then(|s| s.0.last())
+        {
+            Some(theme) => theme,
+            None => cx.global::<Theme>(),
+        }
     }
 
     /// Returns the global theme mutable reference.
@@ -380,7 +389,7 @@ impl Theme {
 
     /// This theme projected onto the Base layer, which owns the scrollbar and
     /// resize handles and reads the semantic tokens.
-    fn base_theme(&self) -> gpui_base::Theme {
+    pub(crate) fn base_theme(&self) -> gpui_base::Theme {
         gpui_base::Theme {
             appearance: if self.mode.is_dark() {
                 gpui_base::ThemeAppearance::Dark
@@ -451,7 +460,8 @@ impl Theme {
     /// It rebuilds the Base theme from scratch, so any style written straight
     /// onto the Base global is replaced. It does not touch [`Theme::tokens`].
     pub fn sync_base(cx: &mut App) {
-        let theme = Theme::global(cx).clone();
+        // The global itself: a scoped theme is not the application's.
+        let theme = cx.global::<Theme>().clone();
         let base_theme = theme.base_theme();
         cx.set_global(base_theme);
         crate::text::install_text_view_defaults(&theme, cx);
