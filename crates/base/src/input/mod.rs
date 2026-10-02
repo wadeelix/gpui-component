@@ -10,6 +10,8 @@ use gpui::App;
 /// Character used by masked editor modes.
 pub(crate) const MASK_CHAR: char = '•';
 
+#[path = "editor/auto_close.rs"]
+mod auto_close;
 mod base;
 #[path = "base/blink_cursor.rs"]
 pub(crate) mod blink_cursor;
@@ -30,9 +32,22 @@ mod element;
 mod highlighting;
 #[path = "editor/indent.rs"]
 mod indent;
+#[path = "base/inline_tokens.rs"]
+mod inline_tokens;
 mod input;
+#[path = "base/token_presentation.rs"]
+mod token_presentation;
+pub use inline_tokens::{InlineToken, InlineTokenError, InlineTokenSpan, InputContent};
+pub(crate) use token_presentation::InlineTokenPresentation;
+pub use token_presentation::{
+    InlineTokenClickEvent, InlineTokenClickListener, InlineTokenContext, InlineTokenRenderer,
+};
 #[path = "base/kind.rs"]
 mod kind;
+#[path = "editor/language.rs"]
+mod language;
+#[path = "editor/language_config.rs"]
+pub mod language_config;
 #[path = "base/layout.rs"]
 mod layout;
 #[path = "editor/lsp/mod.rs"]
@@ -56,6 +71,8 @@ mod state;
 #[path = "base/table_layout.rs"]
 mod table_layout;
 mod textarea;
+#[path = "base/touch.rs"]
+mod touch;
 #[path = "base/undo_manager.rs"]
 mod undo_manager;
 
@@ -66,7 +83,10 @@ pub(crate) fn init(cx: &mut App) {
 pub use crate::number_input::{NumberInputEvent, NumberStep};
 pub use base::{InputBase, InputContextMenuCapabilities, InputStyles};
 pub use cursor::Selection;
-pub use decorations::{TextDecoration, TextDecorationCollection};
+pub use decorations::{
+    RangeDecoration, RangeDecorationCollection, RangeDecorationStyle, TextDecoration,
+    TextDecorationCollection,
+};
 pub use diagnostics::{
     Diagnostic, DiagnosticEntry, DiagnosticRelatedInformation, DiagnosticSet, DiagnosticSeverity,
     DiagnosticSummary, DiagnosticTag, RelatedInformation,
@@ -79,14 +99,18 @@ pub use editor::{Editor, EditorState};
 pub use highlighting::{
     BlockContext, BlockRenderer, BlockWidget, ColumnAlign, DiagnosticColors, FoldIconRenderer,
     HighlightStyleResolver, InlineWidget, InlineWidgetKind, InputEditorStyle, InputHighlighter,
-    InputHighlighterFactory, LineDecoration, SharedHighlightStyleResolver, TableCellSpan, TableRow,
-    TableRowKind,
+    InputHighlighterFactory, LineDecoration, SharedHighlightStyleResolver, SyntaxContext,
+    SyntaxContextProvider, TableCellSpan, TableRow, TableRowKind,
 };
 pub use indent::TabSize;
 pub use input::{Input, InputState};
 pub use kind::{
     EditorExtras, EditorMode, InputExtras, InputMode, InputModeKind, MultiLineMode, TextareaMode,
 };
+pub(crate) use language::EditorLanguage;
+pub use language::{LanguageProvider, set_language_config, set_language_provider};
+pub(crate) use language_config::LanguageConfig;
+pub use language_config::{AutoClosingPair, BracketPair, IndentationRules};
 pub use lsp::{
     CodeActionItem, CodeActionMenuState, CodeActionProvider, CompletionMenuOptions,
     CompletionMenuState, CompletionProvider, DefinitionProvider, DocumentColorProvider,

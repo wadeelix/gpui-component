@@ -17,6 +17,7 @@ use gpui_component::{
     date_picker::{DatePicker, DatePickerState},
     input::{Input, InputState, NumberInput, OtpInput, OtpState},
     slider::{Slider, SliderState},
+    time_field::{TimeField, TimeFieldState},
 };
 use gpui_shell::{
     ArgumentDescriptor, ArgumentSchema, ComponentArgument, ComponentDescriptor,
@@ -60,6 +61,7 @@ mod tests {
                 "SliderState",
                 "ColorPickerState",
                 "DatePickerState",
+                "TimeFieldState",
             ]
         );
         assert_eq!(
@@ -71,7 +73,8 @@ mod tests {
                 "Slider",
                 "ColorPicker",
                 "Calendar",
-                "DatePicker"
+                "DatePicker",
+                "TimeField"
             ]
         );
         assert!(frozen.states().all(|state| state.documentation().is_some()));
@@ -252,7 +255,11 @@ struct InputMaterializer;
 impl ComponentMaterializer for InputMaterializer {
     fn materialize(&self, mut request: MaterializeRequest<'_>) -> anyhow::Result<gpui::AnyElement> {
         let state = state_entity!(request, InputState);
-        let mut input = Input::new(&state);
+        let binding = super::input_tokens::prepare(
+            &request,
+            super::input_tokens::State::Input(state.clone()),
+        )?;
+        let mut input = binding.input(Input::new(&state));
         for op in request
             .methods()
             .filter_map(|method| method.payload().downcast_ref::<FormOp>())
@@ -263,7 +270,7 @@ impl ComponentMaterializer for InputMaterializer {
                 _ => input,
             };
         }
-        finish_leaf(&mut request, input)
+        Ok(binding.wrap(finish_leaf(&mut request, input)?))
     }
 }
 
@@ -360,6 +367,23 @@ impl ComponentMaterializer for DatePickerMaterializer {
             };
         }
         finish_leaf(&mut request, picker)
+    }
+}
+
+struct TimeFieldMaterializer;
+impl ComponentMaterializer for TimeFieldMaterializer {
+    fn materialize(&self, mut request: MaterializeRequest<'_>) -> anyhow::Result<gpui::AnyElement> {
+        let state = state_entity!(request, TimeFieldState);
+        let mut field = TimeField::new(&state);
+        for op in request
+            .methods()
+            .filter_map(|method| method.payload().downcast_ref::<FormOp>())
+        {
+            if let FormOp::Disabled(value) = op {
+                field = field.disabled(*value);
+            }
+        }
+        finish_leaf(&mut request, field)
     }
 }
 
@@ -463,6 +487,7 @@ pub fn register(registry: &mut ComponentRegistry) -> Result<(), RegistryError> {
                 })))
             },
         )
+        .with_methods(gpui_shell::input_token_state_methods())
         .with_documentation(
             "Retained editable text state shared by Input and NumberInput, with optional placeholder and initial value.",
         ),
@@ -531,11 +556,24 @@ pub fn register(registry: &mut ComponentRegistry) -> Result<(), RegistryError> {
         )
         .with_documentation("Retained single-date picker and calendar state."),
     )?;
+    registry.register_state(
+        StateDescriptor::new(
+            "TimeFieldState",
+            "TimeFieldState",
+            vec![],
+            |_, window, cx| Ok(Box::new(cx.new(|cx| TimeFieldState::new(window, cx)))),
+        )
+        .with_documentation("Retained 24-hour, minute-precision time-of-day editing state."),
+    )?;
 
     registry.register(component(
         "Input",
         "InputState",
-        vec![aria_label_method("Input"), disabled_method("Input")],
+        [
+            vec![aria_label_method("Input"), disabled_method("Input")],
+            super::input_tokens::methods(true),
+        ]
+        .concat(),
         "A retained single-line text field.",
         InputMaterializer,
     ))?;
@@ -636,6 +674,13 @@ pub fn register(registry: &mut ComponentRegistry) -> Result<(), RegistryError> {
         ],
         "A retained single-date picker backed by an internal calendar.",
         DatePickerMaterializer,
+    ))?;
+    registry.register(component(
+        "TimeField",
+        "TimeFieldState",
+        vec![disabled_method("TimeField")],
+        "A retained segmented time-of-day field edited from the keyboard.",
+        TimeFieldMaterializer,
     ))?;
     Ok(())
 }

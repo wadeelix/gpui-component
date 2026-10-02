@@ -106,10 +106,18 @@ impl Radio {
         self
     }
 
-    /// Add on_click handler when the Radio is clicked.
+    /// Alias for [`Self::on_change`]. The last callback registered with either name wins.
+    pub fn on_click(self, handler: impl Fn(&bool, &mut Window, &mut App) + 'static) -> Self {
+        self.on_change(handler)
+    }
+
+    /// Handle a requested checked value from pointer or keyboard activation.
     ///
-    /// The `&bool` parameter is the **new checked state**.
-    pub fn on_click(mut self, handler: impl Fn(&bool, &mut Window, &mut App) + 'static) -> Self {
+    /// This is a controlled value: the owner must write the requested value and
+    /// call `cx.notify()` to render it. Disabled controls do not call the handler.
+    /// This and [`Self::on_click`] share one callback; chaining them replaces
+    /// the previous handler instead of calling both.
+    pub fn on_change(mut self, handler: impl Fn(&bool, &mut Window, &mut App) + 'static) -> Self {
         self.on_click = Some(Rc::new(handler));
         self
     }
@@ -156,6 +164,13 @@ impl ParentElement for Radio {
 impl RenderOnce for Radio {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let checked = self.checked;
+        let has_content = self.label.is_some() || !self.children.is_empty();
+        let indicator_size = rems(match self.size {
+            Size::XSmall => 0.75,
+            Size::Small => 0.875,
+            Size::Large => 1.125,
+            _ => 1.,
+        });
         let focus_handle = window
             .use_keyed_state(self.id.clone(), cx, |_, cx| cx.focus_handle())
             .read(cx)
@@ -212,13 +227,9 @@ impl RenderOnce for Radio {
             .child(
                 div()
                     .relative()
-                    .map(|this| match self.size {
-                        Size::XSmall => this.size_3(),
-                        Size::Small => this.size_3p5(),
-                        Size::Medium => this.size_4(),
-                        Size::Large => this.size(rems(1.125)),
-                        _ => this.size_4(),
-                    })
+                    .size(indicator_size)
+                    // Center on the first 1.25em line, including when the label wraps.
+                    .when(has_content, |this| this.mt(indicator_size * 0.125))
                     .flex_shrink_0()
                     .rounded_full_style(cx)
                     .border_1()
@@ -236,13 +247,12 @@ impl RenderOnce for Radio {
                 this.child(
                     v_flex()
                         .w_full()
-                        .line_height(relative(1.2))
+                        .line_height(relative(1.25))
                         .gap_1()
                         .when_some(self.label, |this, label| {
                             this.child(
                                 div()
                                     .size_full()
-                                    .line_height(relative(1.))
                                     .when(self.disabled, |this| {
                                         this.text_color(cx.theme().muted_foreground)
                                     })
@@ -278,7 +288,8 @@ pub struct RadioGroup {
 }
 
 impl RadioGroup {
-    fn new(id: impl Into<ElementId>) -> Self {
+    /// Creates a radio group with vertical layout and no selected item.
+    pub fn new(id: impl Into<ElementId>) -> Self {
         Self {
             id: id.into(),
             style: StyleRefinement::default().flex_1(),
@@ -306,10 +317,18 @@ impl RadioGroup {
         self
     }
 
-    // Add on_click handler when selected index changes.
-    //
-    // The `&usize` parameter is the selected index.
-    pub fn on_click(mut self, handler: impl Fn(&usize, &mut Window, &mut App) + 'static) -> Self {
+    /// Alias for [`Self::on_change`]. The last callback registered with either name wins.
+    pub fn on_click(self, handler: impl Fn(&usize, &mut Window, &mut App) + 'static) -> Self {
+        self.on_change(handler)
+    }
+
+    /// Handle a requested selected index from pointer or keyboard activation.
+    ///
+    /// This is a controlled value: the owner must write the requested value and
+    /// call `cx.notify()` to render it. Disabled controls do not call the handler.
+    /// This and [`Self::on_click`] share one callback; chaining them replaces
+    /// the previous handler instead of calling both.
+    pub fn on_change(mut self, handler: impl Fn(&usize, &mut Window, &mut App) + 'static) -> Self {
         self.on_click = Some(Rc::new(handler));
         self
     }

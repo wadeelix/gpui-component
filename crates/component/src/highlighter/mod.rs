@@ -1,7 +1,9 @@
+mod language_name;
 pub use gpui_base::input::{
     Diagnostic, DiagnosticEntry, DiagnosticRelatedInformation, DiagnosticSet, DiagnosticSeverity,
     DiagnosticSummary, DiagnosticTag, RelatedInformation,
 };
+pub(crate) use language_name::language_name;
 
 mod diagnostic_styles;
 pub(crate) use diagnostic_styles::*;
@@ -24,6 +26,8 @@ mod languages;
 #[cfg(feature = "tree-sitter")]
 mod registry;
 
+#[cfg(feature = "tree-sitter")]
+pub(crate) use highlighter::parse_input_bytes;
 #[cfg(feature = "tree-sitter")]
 pub use highlighter::*;
 #[cfg(feature = "tree-sitter")]

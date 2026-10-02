@@ -58,11 +58,12 @@ impl TableRowItem {
     pub(crate) fn build<F>(
         row: &TableRow,
         line: &str,
+        line_start: usize,
         wrap_width: Pixels,
         wrap_line: &mut F,
     ) -> Self
     where
-        F: FnMut(&str, Pixels) -> Vec<gpui::Boundary>,
+        F: FnMut(&str, Pixels, usize) -> Vec<gpui::Boundary>,
     {
         let width = cell_text_width(wrap_width, row.columns);
         let mut cell_lines = Vec::with_capacity(row.cells.len());
@@ -79,7 +80,7 @@ impl TableRowItem {
                 continue;
             }
             let mut prev = 0;
-            for boundary in wrap_line(text, width) {
+            for boundary in wrap_line(text, width, line_start + content.start) {
                 if boundary.ix > prev && boundary.ix <= text.len() {
                     ranges.push(content.start + prev..content.start + boundary.ix);
                     prev = boundary.ix;
@@ -181,7 +182,7 @@ pub(crate) mod test_support {
     }
 
     /// Wraps at every `width / 10` bytes, so a test can reason in characters.
-    pub(crate) fn wrap_every(text: &str, width: Pixels) -> Vec<gpui::Boundary> {
+    pub(crate) fn wrap_every(text: &str, width: Pixels, _: usize) -> Vec<gpui::Boundary> {
         let per_row = (f32::from(width) / 10.).floor().max(1.) as usize;
         let mut out = Vec::new();
         let mut ix = per_row;
@@ -214,7 +215,7 @@ mod tests {
         // Two columns across 100px: 50px each, minus 12px padding = 38px, so
         // three characters per wrap row.
         let line = "| abcdefg | x |";
-        let item = TableRowItem::build(&row(line, 2), line, px(100.), &mut wrap_every);
+        let item = TableRowItem::build(&row(line, 2), line, 0, px(100.), &mut wrap_every);
         assert_eq!(item.rows, 3, "seven characters at three per row");
         assert_eq!(
             item.cell_lines[0].as_slice(),
@@ -229,7 +230,7 @@ mod tests {
         let line = "| ------------------------ | -------- |";
         let mut delimiter = row(line, 2);
         delimiter.kind = TableRowKind::Delimiter;
-        let item = TableRowItem::build(&delimiter, line, px(100.), &mut wrap_every);
+        let item = TableRowItem::build(&delimiter, line, 0, px(100.), &mut wrap_every);
         assert_eq!(item.rows, 1);
         assert_eq!(item.cell_lines[0].len(), 1);
     }
@@ -237,7 +238,7 @@ mod tests {
     #[test]
     fn an_empty_cell_still_has_one_row_in_the_middle_of_its_padding() {
         let line = "|  | b |";
-        let item = TableRowItem::build(&row(line, 2), line, px(200.), &mut wrap_every);
+        let item = TableRowItem::build(&row(line, 2), line, 0, px(200.), &mut wrap_every);
         assert_eq!(item.rows, 1);
         assert_eq!(item.cell_lines[0].as_slice(), &[2..2]);
     }
@@ -245,7 +246,7 @@ mod tests {
     #[test]
     fn a_missing_cell_is_padded_at_the_line_end() {
         let line = "| a |";
-        let item = TableRowItem::build(&row(line, 3), line, px(300.), &mut wrap_every);
+        let item = TableRowItem::build(&row(line, 3), line, 0, px(300.), &mut wrap_every);
         assert_eq!(item.cell_lines.len(), 3);
         assert_eq!(item.cell_lines[2].as_slice(), &[5..5]);
     }
@@ -255,7 +256,7 @@ mod tests {
         let line = "| a |";
         let mut bad = row(line, 1);
         bad.cells[0].content = 2..40;
-        let item = TableRowItem::build(&bad, line, px(300.), &mut wrap_every);
+        let item = TableRowItem::build(&bad, line, 0, px(300.), &mut wrap_every);
         assert_eq!(item.cell_lines[0].as_slice(), &[2..5]);
     }
 
@@ -263,7 +264,7 @@ mod tests {
     fn the_same_cells_are_the_same_shape_whatever_the_table_s_extent() {
         let line = "| a | b |";
         let mut r = row(line, 2);
-        let item = TableRowItem::build(&r, line, px(300.), &mut wrap_every);
+        let item = TableRowItem::build(&r, line, 0, px(300.), &mut wrap_every);
         r.first_row = 7;
         r.last_row = 9;
         assert!(item.same_shape(&r));
@@ -276,7 +277,7 @@ mod tests {
         // 40 characters at one per row: 40 rows wanted, 32 kept.
         let text = "x".repeat(40);
         let line = format!("| {text} |");
-        let item = TableRowItem::build(&row(&line, 1), &line, px(22.), &mut wrap_every);
+        let item = TableRowItem::build(&row(&line, 1), &line, 0, px(22.), &mut wrap_every);
         assert_eq!(item.rows, MAX_ROWS_PER_CELL);
         assert_eq!(item.cell_lines[0].len(), MAX_ROWS_PER_CELL);
         assert_eq!(

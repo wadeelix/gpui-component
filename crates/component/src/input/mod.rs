@@ -1,11 +1,19 @@
 mod clear_button;
 mod content_type;
 mod input;
+mod token;
+pub use gpui_base::input::{
+    ActivateToken, InlineToken, InlineTokenClickEvent, InlineTokenContext, InlineTokenError,
+    InlineTokenSpan, InputContent,
+};
+pub use token::InputToken;
+pub mod language_config;
 mod number_input;
 mod otp_input;
 mod overlay;
 pub(crate) mod popovers;
 mod search;
+mod syntax_context;
 
 pub(crate) use clear_button::*;
 pub use content_type::*;
@@ -26,7 +34,8 @@ pub use gpui_base::input::{
     InputHighlighterFactory, InputState, LineDecoration, Lsp, MaskPattern, MoveDown, MoveEnd,
     MoveHome, MoveLeft, MovePageDown, MovePageUp, MoveRight, MoveToEnd, MoveToEndOfLine,
     MoveToNextWord, MoveToPreviousWord, MoveToStart, MoveToStartOfLine, MoveUp, NativeMenu,
-    NativeMenuItem, Outdent, OutdentInline, Paste, Point, Redo, Replace, Rope, RopeExt, RopeLines,
+    NativeMenuItem, Outdent, OutdentInline, Paste, Point, RangeDecoration,
+    RangeDecorationCollection, RangeDecorationStyle, Redo, Replace, Rope, RopeExt, RopeLines,
     Search, SelectAll, SelectToEnd, SelectToEndOfLine, SelectToNextWordEnd,
     SelectToPreviousWordStart, SelectToStart, SelectToStartOfLine, Selection, ShowCharacterPalette,
     ShowDocumentHandler, TabSize, TableCellSpan, TableRow, TableRowKind, TextDecoration,
@@ -35,12 +44,22 @@ pub use gpui_base::input::{
 pub use gpui_base::input::{EditorMode, InputMode, InputModeKind, TextareaMode};
 #[doc(hidden)]
 mod editor;
+mod group;
 mod state;
 mod textarea;
 pub use editor::Editor;
+pub use gpui_base::input::{
+    AutoClosingPair, BracketPair, IndentationRules, LanguageProvider, SyntaxContext,
+    SyntaxContextProvider, set_language_config, set_language_provider,
+};
+pub use group::*;
 pub use input::*;
 pub use lsp_types::Position;
 pub use number_input::{NumberInput, NumberInputEvent, NumberStep, StepAction};
 pub use otp_input::*;
 pub use state::AnyInputState;
 pub use textarea::Textarea;
+
+pub(crate) fn init(cx: &mut gpui::App) {
+    language_config::init(cx);
+}

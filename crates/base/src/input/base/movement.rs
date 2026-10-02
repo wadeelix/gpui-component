@@ -1,5 +1,6 @@
 use crate::input::InputModeKind;
 use gpui::{Context, Pixels, Point, Window};
+use sum_tree::Bias;
 
 use crate::input::{
     InputBaseState, MoveDown, MoveEnd, MoveHome, MoveLeft, MovePageDown, MovePageUp, MoveRight,
@@ -21,7 +22,7 @@ impl<M: InputModeKind> InputBaseState<M> {
 
     /// Like [`Self::preferred_column_for`], but resolves an offset on a soft wrap
     /// boundary to the row the caret is drawn on.
-    fn preferred_column_for_with_affinity(
+    pub(super) fn preferred_column_for_with_affinity(
         &self,
         offset: usize,
         line_end_affinity: bool,
@@ -83,7 +84,7 @@ impl<M: InputModeKind> InputBaseState<M> {
     ) {
         self.undo_manager.break_transaction_coalescing();
         self.selections.remove_all_but_active();
-        let offset = offset.clamp(0, self.text.len());
+        let offset = self.cursor_boundary(offset, Bias::Left);
         self.cursor_line_end_affinity = line_end_affinity;
         self.set_cursor_to(offset);
         self.scroll_to(offset, direction, cx);
@@ -110,23 +111,10 @@ impl<M: InputModeKind> InputBaseState<M> {
             return (offset, line_end_affinity);
         };
 
-        // A table row is one wrap row of several text rows: inside a cell the
-        // caret moves by text row, and leaves the table row only from the
-        // cell's first or last one. Otherwise it moves by display row.
-        if move_lines.abs() == 1 {
-            let point = self.text.offset_to_point(offset);
-            let line_start = self.text.line_start_offset(point.row);
-            let inside = last_layout.line(point.row).and_then(|line| {
-                line.table.as_ref()?.step_text_row(
-                    offset.checked_sub(line_start)?,
-                    move_lines < 0,
-                    column_anchor.map(|(x, _)| x),
-                    line_end_affinity,
-                )
-            });
-            if let Some(local) = inside {
-                return (line_start + local, false);
-            }
+        if let Some(target) =
+            self.table_text_row_step(offset, column_anchor, line_end_affinity, move_lines)
+        {
+            return (target, false);
         }
 
         // Start from the row the caret is drawn on, not the row the raw offset falls in: on a
@@ -178,6 +166,8 @@ impl<M: InputModeKind> InputBaseState<M> {
         display_point.column = 0;
         let mut new_offset = self.display_map.wrap_display_point_to_offset(display_point);
 
+        let column_anchor = column_anchor
+            .or_else(|| self.preferred_column_for_with_affinity(offset, line_end_affinity));
         let mut new_affinity = false;
         if let Some((preferred_x, column)) = column_anchor {
             // Get display point again to update local_row.
@@ -214,6 +204,62 @@ impl<M: InputModeKind> InputBaseState<M> {
         (new_offset, new_affinity)
     }
 
+    /// A table row is one wrap row of several text rows: inside a cell the
+    /// caret moves by text row, and leaves the table row only from the
+    /// cell's first or last one. `None` when this move leaves the cell's
+    /// rows, or the caret is not in a table.
+    fn table_text_row_step(
+        &self,
+        offset: usize,
+        column_anchor: Option<(Pixels, usize)>,
+        line_end_affinity: bool,
+        move_lines: isize,
+    ) -> Option<usize> {
+        if move_lines.abs() != 1 {
+            return None;
+        }
+        let last_layout = self.last_layout.as_ref()?;
+        let point = self.text.offset_to_point(offset);
+        let line_start = self.text.line_start_offset(point.row);
+        let local = last_layout.line(point.row)?.table.as_ref()?.step_text_row(
+            offset.checked_sub(line_start)?,
+            move_lines < 0,
+            column_anchor.map(|(x, _)| x),
+            line_end_affinity,
+        )?;
+        Some(line_start + local)
+    }
+
+    /// Extend to the document edge when there is no further visual row. Plain
+    /// movement retains its column there, but selection must still reach the
+    /// remaining text on the first or last row.
+    pub(super) fn vertical_selection_target(
+        &self,
+        offset: usize,
+        column_anchor: Option<(Pixels, usize)>,
+        line_end_affinity: bool,
+        move_lines: isize,
+    ) -> (usize, bool) {
+        // Inside a table cell the move stays on one visual row by design.
+        if let Some(target) =
+            self.table_text_row_step(offset, column_anchor, line_end_affinity, move_lines)
+        {
+            return (target, false);
+        }
+        let target = self.vertical_target(offset, column_anchor, line_end_affinity, move_lines);
+        if self.last_layout.is_some() {
+            let row = |offset, affinity| {
+                self.display_map
+                    .offset_to_wrap_display_point_with_affinity(offset, affinity)
+                    .row
+            };
+            if row(offset, line_end_affinity) == row(target.0, target.1) {
+                return (if move_lines < 0 { 0 } else { self.text.len() }, false);
+            }
+        }
+        target
+    }
+
     /// Move every cursor through `f`, which maps each selection to a
     /// `(new_offset, column_anchor, line_end_affinity)`, collapsing each to a
     /// cursor. Overlapping cursors are merged, then the standard post-move
@@ -227,7 +273,6 @@ impl<M: InputModeKind> InputBaseState<M> {
         cx: &mut Context<Self>,
     ) {
         self.undo_manager.break_transaction_coalescing();
-        let len = self.text.len();
         let mut active_affinity = false;
         let new_selections: Vec<CursorSelection> = self
             .selections
@@ -238,7 +283,7 @@ impl<M: InputModeKind> InputBaseState<M> {
                     active_affinity = line_end_affinity;
                 }
                 let mut new_sel = *sel;
-                new_sel.place_at(offset.clamp(0, len), anchor);
+                new_sel.place_at(self.cursor_boundary(offset, Bias::Left), anchor);
                 new_sel
             })
             .collect();
@@ -289,8 +334,15 @@ impl<M: InputModeKind> InputBaseState<M> {
                     (e, s.preferred_column_for(e), false)
                 } else {
                     let e = s.next_boundary(sel.end.saturating_sub(1));
-                    (e, s.preferred_column_for(e), false)
+                    let affinity = s.line_end_affinity_at(e);
+                    (
+                        e,
+                        s.preferred_column_for_with_affinity(e, affinity),
+                        affinity,
+                    )
                 };
+                let anchor =
+                    anchor.or_else(|| s.preferred_column_for_with_affinity(effective, affinity));
                 let (offset, affinity) = s.vertical_target(effective, anchor, affinity, move_lines);
                 (offset, anchor, affinity)
             },

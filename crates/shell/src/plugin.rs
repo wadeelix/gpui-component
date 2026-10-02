@@ -1313,11 +1313,14 @@ impl ShellRuntime {
         Ok(cx.new(|cx| ShellRoot::with_application(view, root, entry, policy, window, cx)))
     }
 
-    /// Loads and renders an application once, returning its description.
+    /// Loads an application, builds its description, and materializes its
+    /// eager native elements once, returning the checked description.
     ///
-    /// This is the headless host path used by source checks. It keeps engine
+    /// Source checks use this with a hidden window. It keeps engine
     /// handles and the `ScriptView` construction protocol inside the shell
-    /// facade while preserving structured load and render errors.
+    /// facade while preserving structured load, render, and registered-component
+    /// materialization errors. It does not run layout, paint, deferred slots,
+    /// nested view renders, or later interaction and asynchronous states.
     pub fn check(
         self: &Rc<Self>,
         root: impl AsRef<Path>,
@@ -1332,7 +1335,12 @@ impl ShellRuntime {
             .view
             .clone();
         let object = view.read(cx).object().clone();
-        self.render_to_spec(&object, Some(view), window, cx)
+        let policy = view.read(cx).policy();
+        let snapshot = self.build_snapshot(&object, Some(view), policy, window, cx)?;
+        // Keep the application and its callback-owning snapshot alive until
+        // the native elements have been built and dropped.
+        crate::materialize::try_materialize(self, &snapshot, window, cx)?;
+        Ok(snapshot.debug_tree())
     }
 }
 
@@ -1792,8 +1800,11 @@ mod tests {
             application.path().join("main.js"),
             r#"
                 import { div, View } from "gpui-kit";
+                import { Button } from "gpui-base";
                 export default class App extends View {
-                  render(cx) { return "checked through the facade"; }
+                  render(cx) {
+                    return Button.new("checked").child("checked through the facade");
+                  }
                 }
             "#,
         )
@@ -1807,6 +1818,39 @@ mod tests {
             .expect("check application through the high-level facade");
 
         assert!(description.contains("checked through the facade"));
+        let metrics = runtime.metrics().read();
+        assert_eq!(metrics.script_renders(), 1);
+        assert_eq!(metrics.materializations(), 1);
+    }
+
+    #[gpui::test]
+    fn runtime_check_materializes_text_views_without_drawing(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let application = TempTree::new("check-text-views");
+        std::fs::write(
+            application.path().join("main.js"),
+            r##"
+                import { div, View } from "gpui-kit";
+                import { TextView } from "gpui-base";
+                export default class App extends View {
+                  render() {
+                    return div()
+                      .child(TextView.markdown("markdown", "# Markdown"))
+                      .child(TextView.html("html", "<p>HTML</p>"));
+                  }
+                }
+            "##,
+        )
+        .expect("application source");
+        let runtime = ShellRuntime::new_isolated().expect("runtime");
+        let window = cx.add_window(|_, _| gpui::Empty);
+        let mut context = VisualTestContext::from_window(*window.deref(), cx);
+        // CLI check only constructs elements; no layout or drawing is active.
+        let description = context
+            .update(|window, cx| runtime.check(application.path(), window, cx))
+            .expect("check TextViews outside the drawing lifecycle");
+        assert!(description.contains("# Markdown"));
+        assert!(description.contains("<p>HTML</p>"));
     }
 
     #[gpui::test]

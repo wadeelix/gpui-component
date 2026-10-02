@@ -234,6 +234,11 @@ where
                     let weak_cancel = weak_cancel.clone();
                     move |_list_state, window, cx| {
                         _ = weak_cancel.update(cx, |this, cx| {
+                            // Cancel propagates to the BaseCombobox, which may already
+                            // have confirmed and closed before this deferred callback.
+                            if !this.state.open {
+                                return;
+                            }
                             cx.emit(ComboboxEvent::Confirm(this.selected_values()));
                             this.set_open(false, cx);
                             this.focus(window, cx);
@@ -1044,7 +1049,7 @@ fn render_popup_shell<D: SearchableListDelegate + 'static>(
         v_flex()
             .occlude()
             .map(|this| match menu_width {
-                Length::Auto => this.w(bounds.size.width + px(2.)),
+                Length::Auto => this.w(bounds.size.width),
                 Length::Definite(w) => this.w(w),
             })
             .popover_style(cx)

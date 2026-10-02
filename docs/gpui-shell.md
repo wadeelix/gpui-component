@@ -335,7 +335,7 @@ correspond one-to-one with the Rust API, so learning one teaches the other. A
 DSL would need its own parser, diagnostics, editor support, and version
 evolution. JSX would need a compile step, and "edit a line, save, see it" is the
 reason this runtime exists. This matches the GPUI builder style in
-`CLAUDE.md`: keep one fluent chain and express conditions with `when`.
+`AGENTS.md`: keep one fluent chain and express conditions with `when`.
 
 **5.4 A context is valid only for the duration of a call.** `&mut App`,
 `&mut Window`, and `&mut Context<T>` are borrows. `CallScope` turns "am I inside
@@ -1897,7 +1897,7 @@ Rules for script:
 - An unknown token is an error listing the valid set, never a transparent
   fallback — that would reproduce the exact failure this module exists to
   prevent.
-- This matches `CLAUDE.md`: the theme API exposes semantic tokens, not a growing
+- This matches `AGENTS.md`: the theme API exposes semantic tokens, not a growing
   set of component-specific fields.
 
 The preferred read is call-scoped and explicit at each use site, for example
@@ -2238,14 +2238,14 @@ carry the rest of a panel's life across the seam: `set_active`, `set_zoomed`,
 and `release`, which is where the engine frees the retained handle its own
 `build` produced.
 
-**`ScriptDockSkin`** is the appearance. It implements all three renderer traits
+**`ScriptDockSkin`** is the appearance. It implements both renderer traits
 and forwards each callback to a `DockChrome`, whose every method has a default
 reproducing base's own no-chrome behavior — so an application that draws no
 chrome implements none of them and still gets a dock that docks, drags, resizes,
 and persists. Base keeps the drag source, drop-target hit testing, keyboard
 actions, and focus; a chrome implementation never sees a drag event, a mouse
-position, or a hit test, only resolved state through `TabGroupContext`,
-`DockContext`, and `TileContext`.
+position, or a hit test, only resolved state through `TabGroupContext` and
+`DockContext`.
 
 **The script binding** is `DockArea` (a retained entity), `dock_area(area)` (one
 description of it), and `dock_content()` (where a dock's own content goes inside
@@ -2268,7 +2268,7 @@ duplicated by later state changes, so it is refused by the same
 `ScopePhase::Layout` check used for virtual-list row descriptions.
 
 So a chrome element carries a `DockCommand` instead: `SelectTab { node, index }`,
-`ClosePanel { node, panel }`, `MoveTile { panel }` and nine more. A command names
+`ClosePanel { node, panel }`, `ToggleDock { placement }` and four more. A command names
 a container and what to ask it, carries no script value, and is resolved against
 `DockContexts` — the table the skin files each context in as base hands it past,
 cleared once per frame by `materialize` before anything is recorded again. The
@@ -4064,7 +4064,7 @@ missing. Every one of these asserts on the _message_, because the message is the
 instruction for fixing it.
 
 These are security assertions and are not subject to the "avoid trivial tests"
-exemption in `.claude/COMPONENT_TEST_RULES.md`.
+exemption in `.agents/COMPONENT_TEST_RULES.md`.
 
 Two of them are regression guards on the build rather than on this code:
 quickjs-libc's `std` and `os` are asserted absent because `rquickjs-sys` does not
@@ -4146,7 +4146,7 @@ tests that catch a duplicated element id or a missing hitbox.
 
 ### 22.6 Relation to the repository's testing rules
 
-Following `.claude/COMPONENT_TEST_RULES.md`: no tests assert presentation
+Following `.agents/COMPONENT_TEST_RULES.md`: no tests assert presentation
 dimensions, and coverage concentrates on complex logic — call-scope validity,
 arena reuse errors, snapshot lifecycle and render frequency, callback lifetime,
 value conversion, style table non-emptiness, sandbox boundaries, overlay ordering
@@ -4472,7 +4472,7 @@ the view (§10.1).
 **`children` takes an array**, so `map` is the natural list form.
 
 **`when(condition, fn)` keeps the chain in one piece**, matching the GPUI
-builder style `CLAUDE.md` requires, instead of splitting into a temporary and a
+builder style `AGENTS.md` requires, instead of splitting into a temporary and a
 sequence of `if`s:
 
 ```js
@@ -4561,7 +4561,7 @@ examples/js_todolist/         # the reference application
 
 ### Appendix C: Naming
 
-Following `CLAUDE.md`:
+Following `AGENTS.md`:
 
 - No `Kind` suffix: `ScopePhase` rather than `ScopeKind`, `ExecuteGrant` rather
   than `CapabilityKind`, `SpecOp` rather than `SpecOpKind`.

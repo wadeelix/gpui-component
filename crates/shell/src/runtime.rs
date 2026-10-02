@@ -303,6 +303,10 @@ impl<T> Default for CallbackArena<T> {
 }
 
 impl<T: Clone> CallbackArena<T> {
+    pub(crate) fn is_building(&self) -> bool {
+        self.building.is_some()
+    }
+
     pub(crate) fn checkpoint(&self) -> usize {
         self.building
             .as_ref()
@@ -774,11 +778,10 @@ impl Element for FailureDetailText {
         self.styled_text
             .prepaint(id, inspector_id, bounds, &mut (), window, cx);
         let hitbox = window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal);
-        self.selection.register(
-            TextSelectionRegistration::new(hitbox.clone(), bounds).with_text_bounds(vec![bounds]),
-            window,
-            cx,
-        );
+        let registration = TextSelectionRegistration::new(hitbox.clone(), bounds)
+            .with_text_bounds(vec![bounds])
+            .with_rendered_element(&self.selection, window, cx);
+        self.selection.register(registration, window, cx);
         hitbox
     }
 

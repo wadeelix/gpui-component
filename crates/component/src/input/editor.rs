@@ -31,6 +31,8 @@ pub struct Editor {
     ///
     /// If set, this overrides the built-in context menu.
     context_menu_builder: Option<Rc<dyn Fn(NativeMenu, &mut Window, &mut App) -> NativeMenu>>,
+
+    paste_handler: Option<Rc<dyn Fn(&gpui::ClipboardItem, &mut Window, &mut App) -> bool>>,
 }
 
 impl Editor {
@@ -47,6 +49,7 @@ impl Editor {
             role: RoleOverride::default(),
             aria_label: None,
             context_menu_builder: None,
+            paste_handler: None,
         }
     }
 
@@ -98,12 +101,28 @@ impl Editor {
     /// Replace the built-in context menu shown on right-click.
     ///
     /// The closure receives an empty menu and returns the one to show, so it
-    /// decides entirely what appears — the default items are not added.
+    /// decides entirely what appears — the default items are not added. It
+    /// shows only while the state's context menu is enabled, which is the
+    /// default.
     pub fn context_menu(
         mut self,
         f: impl Fn(NativeMenu, &mut Window, &mut App) -> NativeMenu + 'static,
     ) -> Self {
         self.context_menu_builder = Some(Rc::new(f));
+        self
+    }
+
+    /// Intercept paste payloads (images, files) before the default text insertion.
+    ///
+    /// `true` consumes the paste so nothing is inserted, `false` falls through
+    /// to `clipboard.text()`. Copied files arrive as `ExternalPaths` through
+    /// the same hook. On web the clipboard reads `None`; image paste needs
+    /// async clipboard access and is out of scope.
+    pub fn on_paste(
+        mut self,
+        handler: impl Fn(&gpui::ClipboardItem, &mut Window, &mut App) -> bool + 'static,
+    ) -> Self {
+        self.paste_handler = Some(Rc::new(handler));
         self
     }
 }
@@ -135,6 +154,9 @@ impl RenderOnce for Editor {
             .when_some(self.aria_label, |this, label| this.aria_label(label))
             .when_some(self.context_menu_builder, |this, build| {
                 this.context_menu(move |menu, window, cx| build(menu, window, cx))
+            })
+            .when_some(self.paste_handler, |this, handler| {
+                this.on_paste(move |item, window, cx| handler(item, window, cx))
             })
             .refine_style(&self.style)
     }
@@ -194,5 +216,208 @@ mod tests {
         // A text style set on the editor refines over that, rows and all.
         assert_eq!(line_height(cx, Some(px(24.))), px(36.));
         assert_eq!(line_height(cx, Some(px(40.))), px(60.));
+    }
+    #[gpui::test]
+    fn language_config_works_without_render_sync(cx: &mut TestAppContext) {
+        use crate::input::{AutoClosingPair, language_config::LanguageConfig, set_language_config};
+        use gpui::EntityInputHandler as _;
+        cx.update(crate::init);
+        let mut state = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let editor = cx.new(|cx| EditorState::new(window, cx).language("plaintext"));
+            // Plain-text defaults apply before the first render.
+            editor.update(cx, |state, cx| {
+                state.replace_text_in_range(None, "(", window, cx);
+                assert_eq!(state.text().to_string(), "(");
+                state.set_value("", window, cx);
+                state.set_highlighter("json", cx);
+                state.replace_text_in_range(None, "[", window, cx);
+                assert_eq!(state.text().to_string(), "[]");
+            });
+            state = Some(editor.clone());
+            Harness {
+                state: editor,
+                text_size: None,
+            }
+        });
+        let state = state.unwrap();
+        VisualTestContext::update(cx, |_, cx| {
+            set_language_config(
+                "json",
+                LanguageConfig::default().auto_closing_pairs([AutoClosingPair::new("«", "»")]),
+                cx,
+            );
+        });
+        // A styled render must preserve the registered configuration.
+        VisualTestContext::update(cx, |window, cx| window.draw(cx).clear(cx));
+        VisualTestContext::update(cx, |window, cx| {
+            state.update(cx, |state, cx| {
+                state.set_value("", window, cx);
+                state.replace_text_in_range(None, "«", window, cx);
+                assert_eq!(state.text().to_string(), "«»");
+                state.set_value("if enabled:", window, cx);
+                state.set_selected_range(11..11, cx);
+                state.set_highlighter("python", cx);
+                state.focus(window, cx);
+            });
+        });
+        VisualTestContext::update(cx, |window, cx| window.draw(cx).clear(cx));
+        cx.simulate_keystrokes("enter");
+        cx.read(|cx| assert_eq!(state.read(cx).text().to_string(), "if enabled:\n  "));
+    }
+
+    #[gpui::test]
+    fn aliases_share_config_even_when_registered_before_init(cx: &mut TestAppContext) {
+        use crate::input::{AutoClosingPair, language_config::LanguageConfig, set_language_config};
+        use gpui::EntityInputHandler as _;
+        cx.update(|cx| {
+            set_language_config(
+                "py",
+                LanguageConfig::default().auto_closing_pairs([AutoClosingPair::new("«", "»")]),
+                cx,
+            )
+        });
+        cx.update(crate::init);
+        cx.add_window_view(|window, cx| {
+            let editor = cx.new(|cx| EditorState::new(window, cx).language("PYTHON"));
+            editor.update(cx, |state, cx| {
+                state.replace_text_in_range(None, "«", window, cx);
+                assert_eq!(state.text().to_string(), "«»");
+            });
+            set_language_config("pyi", LanguageConfig::default().auto_closing_pairs([]), cx);
+            editor.update(cx, |state, cx| {
+                state.set_value("", window, cx);
+                state.set_highlighter("py", cx);
+                state.replace_text_in_range(None, "(", window, cx);
+                assert_eq!(state.text().to_string(), "(");
+            });
+            Harness {
+                state: editor,
+                text_size: None,
+            }
+        });
+    }
+
+    #[cfg(all(feature = "tree-sitter-python", feature = "tree-sitter-rust"))]
+    #[gpui::test]
+    fn syntax_follows_language_before_first_render_and_after_switch(cx: &mut TestAppContext) {
+        use gpui::EntityInputHandler as _;
+        cx.update(crate::init);
+        cx.add_window_view(|window, cx| {
+            let editor = cx.new(|cx| {
+                EditorState::new(window, cx)
+                    .language("python")
+                    .default_value("\"hello world\"")
+            });
+            editor.update(cx, |state, cx| {
+                state.set_selected_range(6..6, cx);
+                state.replace_text_in_range(None, "(", window, cx);
+                assert_eq!(state.text().to_string(), "\"hello( world\"");
+                state.set_value("# comment ", window, cx);
+                state.set_selected_range(10..10, cx);
+                state.replace_text_in_range(None, "(", window, cx);
+                assert_eq!(state.text().to_string(), "# comment (");
+                state.set_value("# comment ", window, cx);
+                state.set_selected_range(10..10, cx);
+                state.set_highlighter("rust", cx);
+                state.replace_text_in_range(None, "(", window, cx);
+                assert_eq!(state.text().to_string(), "# comment ()");
+            });
+            Harness {
+                state: editor,
+                text_size: None,
+            }
+        });
+    }
+
+    #[cfg(feature = "tree-sitter-python")]
+    #[gpui::test]
+    fn python_pairing_uses_pre_edit_context(cx: &mut TestAppContext) {
+        use gpui::EntityInputHandler as _;
+        cx.update(crate::init);
+        for (before, cursor, typed, expected) in [
+            ("x = ", 4, "\"", "x = \"\""),
+            ("x = f\"{value}\"", 12, "(", "x = f\"{value()}\""),
+            ("x = \"value\"", 7, "(", "x = \"va(lue\""),
+            ("x = \"value\"", 5, "(", "x = \"(value\""),
+            ("x = \"value\"", 10, "(", "x = \"value(\""),
+        ] {
+            let mut state = None;
+            let (_, cx) = cx.add_window_view(|window, cx| {
+                let editor = cx.new(|cx| EditorState::new(window, cx).default_value(before));
+                state = Some(editor.clone());
+                Harness {
+                    state: editor,
+                    text_size: None,
+                }
+            });
+            let state = state.unwrap();
+            VisualTestContext::update(cx, |window, cx| {
+                state.update(cx, |state, cx| {
+                    state.set_highlighter("python", cx);
+                    state.set_selected_range(cursor..cursor, cx);
+                    state.replace_text_in_range(None, typed, window, cx);
+                    assert_eq!(state.text().to_string(), expected);
+                });
+            });
+        }
+    }
+    #[cfg(feature = "tree-sitter-rust")]
+    #[gpui::test]
+    fn generated_comment_closer_survives_syntax_changes(cx: &mut TestAppContext) {
+        use crate::input::{AutoClosingPair, SyntaxContext, language_config::LanguageConfig};
+        use gpui::EntityInputHandler as _;
+        cx.update(crate::init);
+        cx.update(|cx| {
+            crate::input::set_language_config(
+                "rust",
+                LanguageConfig::default().auto_closing_pairs([AutoClosingPair::new("/*", "*/")
+                    .not_in([SyntaxContext::String, SyntaxContext::Comment])]),
+                cx,
+            )
+        });
+        let mut state = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let editor = cx.new(|cx| EditorState::new(window, cx).language("rust"));
+            state = Some(editor.clone());
+            Harness {
+                state: editor,
+                text_size: None,
+            }
+        });
+        let state = state.unwrap();
+        VisualTestContext::update(cx, |window, cx| {
+            state.update(cx, |state, cx| {
+                state.set_highlighter("rust", cx);
+
+                for text in ["/", "*", "x", "*", "/"] {
+                    state.replace_text_in_range(None, text, window, cx);
+                }
+                assert_eq!(state.text().to_string(), "/*x*/");
+                state.replace_text_in_range(None, "!", window, cx);
+                assert_eq!(state.text().to_string(), "/*x*/!");
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn test_on_paste_builder(cx: &mut TestAppContext) {
+        use gpui::{AppContext as _, Render};
+
+        struct PasteProbe;
+        impl Render for PasteProbe {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+            }
+        }
+
+        cx.update(crate::init);
+        let _ = cx.add_window_view(|window, cx| {
+            let state = cx.new(|cx| EditorState::new(window, cx));
+            assert!(Editor::new(&state).paste_handler.is_none());
+            let editor = Editor::new(&state).on_paste(|_, _, _| true);
+            assert!(editor.paste_handler.is_some());
+            PasteProbe
+        });
     }
 }

@@ -8,7 +8,7 @@ use gpui::{
 };
 use smallvec::SmallVec;
 
-use crate::{StateStyle, StyledExt as _};
+use crate::{StateStyle, StyledExt as _, TestSupportExt as _};
 
 type ChangeHandler = Rc<dyn Fn(bool, &ClickEvent, &mut Window, &mut App)>;
 
@@ -31,6 +31,7 @@ pub struct Switch {
     accessibility_label: Option<SharedString>,
     tab_index: isize,
     tab_stop: bool,
+    provided_focus_handle: Option<FocusHandle>,
 }
 
 /// Semantic root styles supported by [`Switch`].
@@ -254,6 +255,7 @@ impl Switch {
             accessibility_label: None,
             tab_index: 0,
             tab_stop: true,
+            provided_focus_handle: None,
         }
     }
 
@@ -314,11 +316,19 @@ impl Switch {
         self
     }
 
+    /// Uses a caller-owned focus handle instead of creating keyed state.
+    pub fn track_focus(mut self, focus_handle: &FocusHandle) -> Self {
+        self.provided_focus_handle = Some(focus_handle.clone());
+        self
+    }
+
     fn focus_handle(&self, window: &mut Window, cx: &mut App) -> FocusHandle {
-        window
-            .use_keyed_state(self.id.clone(), cx, |_, cx| cx.focus_handle())
-            .read(cx)
-            .clone()
+        self.provided_focus_handle.clone().unwrap_or_else(|| {
+            window
+                .use_keyed_state(self.id.clone(), cx, |_, cx| cx.focus_handle())
+                .read(cx)
+                .clone()
+        })
     }
 }
 
@@ -350,6 +360,7 @@ impl RenderOnce for Switch {
         let style = self.resolved_style();
 
         self.base
+            .test_support()
             .role(Role::Switch)
             .aria_toggled(if checked {
                 Toggled::True
