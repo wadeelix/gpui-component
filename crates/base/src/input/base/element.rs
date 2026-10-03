@@ -425,6 +425,24 @@ pub(super) struct InlineWidgetLayout {
     pub(super) element: gpui::AnyElement,
 }
 
+/// A task box's outline and fill. The outline is the text's colour in every
+/// state, as the Markdown renderer draws it (`TextNode::task_box`): an open
+/// box once took the field-border colour, a rule meant to sit back, and on
+/// the page it all but vanished while the same task read clearly in reading
+/// mode.
+fn task_box_colours(
+    mark: crate::text::TaskMark,
+    style: &crate::input::InputEditorStyle,
+) -> (gpui::Hsla, gpui::Hsla) {
+    let ink = style.foreground;
+    let background = match mark {
+        crate::text::TaskMark::Done => ink,
+        crate::text::TaskMark::Cancelled => ink.opacity(0.15),
+        _ => gpui::transparent_black(),
+    };
+    (ink, background)
+}
+
 /// Draws one inline widget. A checkbox reports its click by replacing the
 /// marker text, so the document stays the only source of truth (spec §4 I1)
 /// and undo works without the widget knowing anything about history.
@@ -436,7 +454,8 @@ fn render_inline_widget<M: InputModeKind>(
 ) -> impl IntoElement {
     let crate::input::InlineWidgetKind::Checkbox { mark } = widget.kind;
     let range = widget.range.clone();
-    let (border, fill) = (style.border, style.foreground);
+    let fill = style.foreground;
+    let (border, background) = task_box_colours(mark, style);
     let checked = matches!(mark, crate::text::TaskMark::Done);
 
     // The same five shapes the Markdown renderer draws (`TaskMark`), so a
@@ -450,12 +469,8 @@ fn render_inline_widget<M: InputModeKind>(
         .flex()
         .items_center()
         .justify_center()
-        .border_color(if checked { fill } else { border })
-        .bg(if checked {
-            fill
-        } else {
-            gpui::transparent_black()
-        });
+        .border_color(border)
+        .bg(background);
     match mark {
         crate::text::TaskMark::Todo => {}
         crate::text::TaskMark::Done => {
@@ -478,9 +493,7 @@ fn render_inline_widget<M: InputModeKind>(
         // from waiting's short bar at a glance, and drawn from the same
         // primitives as the rest, so it needs no asset and follows the theme.
         crate::text::TaskMark::Cancelled => {
-            box_ = box_
-                .bg(fill.opacity(0.15))
-                .child(gpui::div().w(px(11.)).h(px(1.5)).bg(fill));
+            box_ = box_.child(gpui::div().w(px(11.)).h(px(1.5)).bg(fill));
         }
     }
 
@@ -4389,6 +4402,36 @@ mod tests {
         AppContext as _, Context, EntityInputHandler as _, Render, TestAppContext,
         VisualTestContext, div,
     };
+
+    /// Every task box is outlined in the text's colour, an open one too:
+    /// in the field-border colour it all but vanished on the page.
+    #[test]
+    fn a_task_box_is_outlined_in_the_text_colour() {
+        use crate::text::TaskMark;
+        let style = crate::input::InputEditorStyle {
+            foreground: gpui::black(),
+            border: gpui::hsla(0., 0., 0.9, 1.),
+            ..Default::default()
+        };
+        for mark in [
+            TaskMark::Todo,
+            TaskMark::Doing,
+            TaskMark::Waiting,
+            TaskMark::Done,
+            TaskMark::Cancelled,
+        ] {
+            assert_eq!(
+                task_box_colours(mark, &style).0,
+                style.foreground,
+                "{mark:?}"
+            );
+        }
+        assert_eq!(task_box_colours(TaskMark::Done, &style).1, style.foreground);
+        assert_eq!(
+            task_box_colours(TaskMark::Todo, &style).1,
+            gpui::transparent_black()
+        );
+    }
 
     #[test]
     fn line_number_column_stays_at_three_digits_then_grows_up_to_seven() {
