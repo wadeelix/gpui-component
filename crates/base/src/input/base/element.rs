@@ -455,13 +455,15 @@ fn render_inline_widget<M: InputModeKind>(
     buffer_line: usize,
     style: &crate::input::InputEditorStyle,
     state: gpui::WeakEntity<InputBaseState<M>>,
+    scale: f32,
 ) -> gpui::AnyElement {
     let mark = match widget.kind {
         crate::input::InlineWidgetKind::Checkbox { mark } => mark,
         crate::input::InlineWidgetKind::Bullet { depth } => {
-            return bullet(depth, style.foreground).into_any_element();
+            return bullet(depth, style.foreground, scale).into_any_element();
         }
     };
+    let px = |value: f32| px(value * scale);
     let range = widget.range.clone();
     let fill = style.foreground;
     let (border, background) = task_box_colours(mark, style);
@@ -472,7 +474,7 @@ fn render_inline_widget<M: InputModeKind>(
     // A ticked box carries the tick rather than only being filled: filled
     // alone reads as a blob, and the two states then differ only by weight.
     let mut box_ = gpui::div()
-        .size(TASK_BOX)
+        .size(TASK_BOX * scale)
         .border_1()
         .rounded(px(3.))
         .flex()
@@ -536,12 +538,12 @@ const BULLET_DOT: Pixels = px(5.);
 
 /// A list bullet centred in its marker's room: a dot, a ring, a square, by
 /// nesting depth, as the Markdown renderer's `•`, `◦`, `▪`.
-fn bullet(depth: u8, ink: gpui::Hsla) -> gpui::Div {
-    let mark = gpui::div().size(BULLET_DOT);
+fn bullet(depth: u8, ink: gpui::Hsla, scale: f32) -> gpui::Div {
+    let mark = gpui::div().size(BULLET_DOT * scale);
     let mark = match depth % 3 {
         0 => mark.rounded_full().bg(ink),
         1 => mark.rounded_full().border_1().border_color(ink),
-        _ => mark.size(BULLET_DOT - px(1.)).bg(ink),
+        _ => mark.size((BULLET_DOT - px(1.)) * scale).bg(ink),
     };
     gpui::div()
         .size_full()
@@ -1840,6 +1842,9 @@ impl<M: InputModeKind> TextElement<M> {
             return Vec::new();
         }
         let line_height = last_layout.line_height;
+        // The boxes and dots are drawn for 16 px text, and grow with the
+        // editor's text: zoomed, a 13 px box beside 24 px words is a speck.
+        let scale = window.text_style().font_size.to_pixels(window.rem_size()) / px(16.);
         let mut out = Vec::new();
         let mut hitboxes = Vec::new();
         let mut offset_y = last_layout.visible_top;
@@ -1879,7 +1884,7 @@ impl<M: InputModeKind> TextElement<M> {
                 let width = if bullet {
                     end.x - at.x
                 } else {
-                    (end.x - at.x).max(TASK_BOX)
+                    (end.x - at.x).max(TASK_BOX * scale)
                 };
                 let widget_bounds = Bounds {
                     origin: line_origin + at,
@@ -1894,8 +1899,13 @@ impl<M: InputModeKind> TextElement<M> {
                     range: line_start + widget.range.start..line_start + widget.range.end,
                     ..widget.clone()
                 };
-                let element =
-                    render_inline_widget(&widget, buffer_line, &style, self.state.downgrade());
+                let element = render_inline_widget(
+                    &widget,
+                    buffer_line,
+                    &style,
+                    self.state.downgrade(),
+                    scale,
+                );
                 let mut element = element.into_any_element();
                 element.prepaint_as_root(
                     widget_bounds.origin,

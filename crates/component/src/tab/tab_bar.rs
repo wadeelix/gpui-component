@@ -241,7 +241,7 @@ impl TabBar {
 
         let variant = self.variant;
         let size = self.size;
-        let inner_height = variant.inner_height(size);
+        let inner_height = variant.inner_height(size) * super::tab::rem_scale(window);
         let inner_radius = variant.inner_radius(size, cx);
 
         let indicator = div()

@@ -20,6 +20,13 @@ pub enum TabVariant {
     Underline,
 }
 
+/// How much larger than the library's 16 px rem the window's rem is: the
+/// tab heights are stated in pixels at that rem, and an application that
+/// zooms by growing its rem expects its tabs to grow with their text.
+pub(super) fn rem_scale(window: &Window) -> f32 {
+    window.rem_size() / px(16.)
+}
+
 impl TabVariant {
     fn height(&self, size: Size) -> Pixels {
         match size {
@@ -617,7 +624,7 @@ impl Sizable for Tab {
 }
 
 impl RenderOnce for Tab {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let mut normal_style = self.variant.normal(cx);
         let mut selected_style = self.variant.selected(cx);
         let mut disabled_style = self.variant.disabled(self.selected, cx);
@@ -643,10 +650,11 @@ impl RenderOnce for Tab {
         };
         let radius = self.variant.radius(self.size, cx);
         let inner_radius = self.variant.inner_radius(self.size, cx);
-        let inner_paddings = self.variant.inner_paddings(self.size);
+        let scale = rem_scale(window);
+        let inner_paddings = self.variant.inner_paddings(self.size).map(|p| *p * scale);
         let inner_margins = self.variant.inner_margins(self.size);
-        let inner_height = self.variant.inner_height(self.size);
-        let height = self.variant.height(self.size);
+        let inner_height = self.variant.inner_height(self.size) * scale;
+        let height = self.variant.height(self.size) * scale;
         let aria_label = self.a11y_label();
 
         let segmented_indicator_active =
