@@ -240,6 +240,36 @@ pub trait InputHighlighter {
         let _ = (line_range, text, generation);
         None
     }
+
+    /// How the buffer line covering `line_range` wraps and which of its bytes
+    /// are set in the monospace font (see [`LineShape`]).
+    ///
+    /// Asked at wrap time, like `table_row`, with `text` as it will be after
+    /// the edit and the same `generation`. The answer is kept with the line's
+    /// wrap rows and the layout draws from that record, so what a line was
+    /// wrapped at and what it is drawn with cannot disagree. It should not
+    /// depend on the caret: the rows would move under the reader as it does.
+    ///
+    /// Default: nothing hangs, nothing is monospace.
+    fn line_shape(&self, line_range: &Range<usize>, text: &Rope, generation: u64) -> LineShape {
+        let _ = (line_range, text, generation);
+        LineShape::default()
+    }
+}
+
+/// What a line's text needs from the wrapper beyond its bytes (see
+/// [`InputHighlighter::line_shape`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LineShape {
+    /// The byte, relative to the line start, that the line's wrapped rows
+    /// start under: past a list item's marker and task box, so a wrapped
+    /// item hangs under its own text rather than returning to the margin.
+    /// `None` leaves continuation rows under the line's leading whitespace.
+    pub hang: Option<usize>,
+    /// Byte ranges, relative to the line start, set in the monospace font:
+    /// inline code. Sorted and non-overlapping. The wrapper measures them in
+    /// that font, so a line of code wraps where its glyphs end.
+    pub monospace: Vec<Range<usize>>,
 }
 
 /// A widget drawn in place of a range of text (see
@@ -261,6 +291,18 @@ pub enum InlineWidgetKind {
     /// Carries the same [`crate::text::TaskMark`] the Markdown renderer draws,
     /// so a note looks the same while it is being edited and once it is read.
     Checkbox { mark: crate::text::TaskMark },
+    /// A list bullet, drawn as the dot the Markdown renderer draws, over the
+    /// `-`, `*` or `+` it stands for. Not clickable: a click there places the
+    /// caret, as on any text.
+    ///
+    /// Leave the marker's text in the layout and paint it transparent rather
+    /// than concealing it, so the line keeps the width it was wrapped at and
+    /// the dot has the marker's room to sit in.
+    ///
+    /// `depth` is how deeply the item is nested, 0 at the margin: the dot,
+    /// the ring and the square follow one another as the Markdown renderer's
+    /// `•`, `◦` and `▪` do.
+    Bullet { depth: u8 },
 }
 
 /// A block the application draws in place of a whole buffer line
@@ -319,6 +361,16 @@ pub struct TableRow {
     pub aligns: Vec<ColumnAlign>,
     /// Exactly `columns` cells, as byte ranges relative to the line start.
     pub cells: Vec<TableCellSpan>,
+    /// Per column, the text of its widest cell as the reader sees it --
+    /// markup that is concealed left out -- the same for every row of the
+    /// table. The engine measures it to size the column: a column is as wide
+    /// as its widest cell when the table fits, and the columns share the
+    /// width in proportion to it when it does not, so a column of two-digit
+    /// numbers does not take as much room as one of sentences.
+    ///
+    /// Empty, the columns are equal. A row whose `widest` changed is a table
+    /// whose shape changed: every row of it is laid out again.
+    pub widest: Vec<String>,
 }
 
 /// What a table row is to a reader: the header, the delimiter under it, or a

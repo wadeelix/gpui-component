@@ -35,7 +35,7 @@ use crate::actions::{SelectDown, SelectLeft, SelectRight, SelectUp};
 use crate::input::blink_cursor::CURSOR_WIDTH;
 use crate::input::movement::MoveDirection;
 use crate::input::{
-    InputExtras as _, LineHeightScale, Position, RopeExt as _, TableRowSource,
+    InputExtras as _, LineHeightScale, LineShapeSource, Position, RopeExt as _, TableRowSource,
     element::RIGHT_MARGIN, layout::LastLayout,
 };
 use crate::{AutoScroll, StepAction};
@@ -928,14 +928,26 @@ impl<M: InputModeKind> InputBaseState<M> {
         };
         // Which lines are table rows, decided by the same highlighter at the
         // same moment: at wrap time, from the text as it will be.
-        let table_rows: TableRowSource = Rc::new(move |range: &Range<usize>, text, generation| {
-            highlighter
-                .borrow()
-                .as_ref()
-                .and_then(|highlighter| highlighter.table_row(range, text, generation))
-        });
+        let table_rows: TableRowSource = {
+            let highlighter = highlighter.clone();
+            Rc::new(move |range: &Range<usize>, text, generation| {
+                highlighter
+                    .borrow()
+                    .as_ref()
+                    .and_then(|highlighter| highlighter.table_row(range, text, generation))
+            })
+        };
+        // How a line hangs and what of it is code, asked at the same moment.
+        let line_shapes: LineShapeSource =
+            Rc::new(move |range: &Range<usize>, text, generation| {
+                highlighter
+                    .borrow()
+                    .as_ref()
+                    .map(|highlighter| highlighter.line_shape(range, text, generation))
+                    .unwrap_or_default()
+            });
         self.display_map
-            .set_line_hooks(Some(scale), Some(table_rows), cx);
+            .set_line_hooks(Some(scale), Some(table_rows), Some(line_shapes), cx);
     }
 
     /// The window rectangle of column `column` of the table row holding
@@ -8779,6 +8791,7 @@ mod tests {
                 columns,
                 aligns: vec![crate::input::ColumnAlign::Left; columns],
                 cells: table_cells(&line_of(row)?, Some(columns)),
+                widest: Vec::new(),
             })
         }
     }

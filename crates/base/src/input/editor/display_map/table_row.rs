@@ -28,12 +28,82 @@ pub(crate) const CELL_PAD: Pixels = px(6.);
 /// every character; without a ceiling one such row would dwarf the document.
 const MAX_ROWS_PER_CELL: usize = 32;
 
-/// Width the text of one cell wraps at, for a table of `columns` columns laid
-/// out across `wrap_width`. Columns are equal: a pure function of two numbers,
-/// so the wrapper, the layout and the hit test cannot disagree on it.
-pub(crate) fn cell_text_width(wrap_width: Pixels, columns: usize) -> Pixels {
-    let columns = columns.max(1) as f32;
-    (wrap_width / columns - CELL_PAD * 2.).max(px(1.))
+/// The narrowest a column is laid out, padding included: room for a word of
+/// a few letters, so a column of empty cells can still be clicked into.
+const MIN_COLUMN: Pixels = px(48.);
+
+/// Header cells are drawn bold, a little wider than the text font measures.
+const BOLD_SLACK: f32 = 1.1;
+
+/// Where each of `columns` columns sits across `wrap_width`, as `(x, width)`
+/// with padding included, given what each column's widest cell measures.
+///
+/// A table that fits is as wide as its columns want, not the whole text
+/// column: each takes its widest cell plus padding. One that does not fit
+/// spans `wrap_width`, a column that wants no more than an equal share keeps
+/// what it wants, and the rest share what is left in proportion to their
+/// wants. Without a measure for every column the columns are equal, as they
+/// always were.
+///
+/// Decided once, at wrap time, and kept with the row: the wrapper, the layout
+/// and the hit test all read the same numbers.
+pub(crate) fn column_spans(
+    wrap_width: Pixels,
+    columns: usize,
+    natural: &[Pixels],
+) -> Vec<(Pixels, Pixels)> {
+    let columns = columns.max(1);
+    let widths: Vec<Pixels> = if natural.len() != columns {
+        vec![wrap_width / columns as f32; columns]
+    } else {
+        let want: Vec<Pixels> = natural
+            .iter()
+            .map(|width| (*width + CELL_PAD * 2.).max(MIN_COLUMN))
+            .collect();
+        let total = want.iter().fold(px(0.), |sum, w| sum + *w);
+        if total <= wrap_width {
+            want
+        } else {
+            share(wrap_width, &want)
+        }
+    };
+    let mut x = px(0.);
+    widths
+        .into_iter()
+        .map(|width| {
+            let span = (x, width);
+            x += width;
+            span
+        })
+        .collect()
+}
+
+/// `width` shared out among columns that want more than it in total: those
+/// wanting no more than an equal share of what is left keep their want, the
+/// rest divide the remainder in proportion to theirs.
+fn share(width: Pixels, want: &[Pixels]) -> Vec<Pixels> {
+    let mut out: Vec<Option<Pixels>> = vec![None; want.len()];
+    let mut left = width;
+    loop {
+        let open: Vec<usize> = (0..want.len()).filter(|&c| out[c].is_none()).collect();
+        if open.is_empty() {
+            break;
+        }
+        let fair = left / open.len() as f32;
+        let small: Vec<usize> = open.iter().copied().filter(|&c| want[c] <= fair).collect();
+        if small.is_empty() {
+            let wanted = open.iter().fold(px(0.), |sum, &c| sum + want[c]);
+            for &c in &open {
+                out[c] = Some(left * (want[c] / wanted));
+            }
+            break;
+        }
+        for c in small {
+            out[c] = Some(want[c]);
+            left -= want[c];
+        }
+    }
+    out.into_iter().map(|w| w.unwrap_or(MIN_COLUMN)).collect()
 }
 
 /// The wrap-time shape of one table row: what `layout_lines` shapes and what
@@ -45,6 +115,12 @@ pub(crate) struct TableRowItem {
     pub(crate) aligns: Vec<ColumnAlign>,
     /// Exactly `columns` cells, relative to the line start.
     pub(crate) cells: Vec<TableCellSpan>,
+    /// Per column, its left edge and width across the text area, padding
+    /// included (`column_spans`).
+    pub(crate) spans: Vec<(Pixels, Pixels)>,
+    /// Per column, the widest cell as the application reported it; kept to
+    /// tell whether a row still has the shape it was laid out with.
+    widest: Vec<String>,
     /// Per cell, the wrapped byte ranges of its content, relative to the line
     /// start. At least one range per cell, empty for an empty cell.
     pub(crate) cell_lines: Vec<SmallVec<[Range<usize>; 1]>>,
@@ -53,22 +129,32 @@ pub(crate) struct TableRowItem {
 }
 
 impl TableRowItem {
-    /// Wraps every cell of `row` at the column's text width with `wrap_line`,
-    /// the same closure the wrapper wraps prose with.
+    /// Wraps every cell of `row` at its column's text width with `wrap_line`,
+    /// the same closure the wrapper wraps prose with, the columns sized from
+    /// the row's `widest` with `measure`, which measures in the text font.
     pub(crate) fn build<F>(
         row: &TableRow,
         line: &str,
         line_start: usize,
         wrap_width: Pixels,
         wrap_line: &mut F,
+        measure: &mut dyn FnMut(&str) -> Pixels,
     ) -> Self
     where
         F: FnMut(&str, Pixels, usize) -> Vec<gpui::Boundary>,
     {
-        let width = cell_text_width(wrap_width, row.columns);
+        let natural: Vec<Pixels> = row
+            .widest
+            .iter()
+            .map(|text| measure(text) * BOLD_SLACK)
+            .collect();
+        let spans = column_spans(wrap_width, row.columns, &natural);
         let mut cell_lines = Vec::with_capacity(row.cells.len());
         let mut rows = 1;
-        for cell in &row.cells {
+        for (c, cell) in row.cells.iter().enumerate() {
+            let width = spans
+                .get(c)
+                .map_or(px(1.), |&(_, width)| (width - CELL_PAD * 2.).max(px(1.)));
             let content = clamp_to_line(line, &cell.content);
             let text = &line[content.clone()];
             let mut ranges: SmallVec<[Range<usize>; 1]> = SmallVec::new();
@@ -106,6 +192,8 @@ impl TableRowItem {
             columns: row.columns,
             aligns: row.aligns.clone(),
             cells: row.cells.clone(),
+            spans,
+            widest: row.widest.clone(),
             cell_lines,
             rows,
         }
@@ -119,6 +207,7 @@ impl TableRowItem {
             && self.columns == row.columns
             && self.aligns == row.aligns
             && self.cells == row.cells
+            && self.widest == row.widest
     }
 }
 
@@ -207,7 +296,13 @@ mod tests {
             columns,
             aligns: vec![ColumnAlign::Left; columns],
             cells: cells_of(line, Some(columns)),
+            widest: Vec::new(),
         }
+    }
+
+    /// Ten pixels a character, as `wrap_every` wraps.
+    fn chars(text: &str) -> Pixels {
+        px(text.chars().count() as f32 * 10.)
     }
 
     #[test]
@@ -215,7 +310,14 @@ mod tests {
         // Two columns across 100px: 50px each, minus 12px padding = 38px, so
         // three characters per wrap row.
         let line = "| abcdefg | x |";
-        let item = TableRowItem::build(&row(line, 2), line, 0, px(100.), &mut wrap_every);
+        let item = TableRowItem::build(
+            &row(line, 2),
+            line,
+            0,
+            px(100.),
+            &mut wrap_every,
+            &mut chars,
+        );
         assert_eq!(item.rows, 3, "seven characters at three per row");
         assert_eq!(
             item.cell_lines[0].as_slice(),
@@ -230,7 +332,7 @@ mod tests {
         let line = "| ------------------------ | -------- |";
         let mut delimiter = row(line, 2);
         delimiter.kind = TableRowKind::Delimiter;
-        let item = TableRowItem::build(&delimiter, line, 0, px(100.), &mut wrap_every);
+        let item = TableRowItem::build(&delimiter, line, 0, px(100.), &mut wrap_every, &mut chars);
         assert_eq!(item.rows, 1);
         assert_eq!(item.cell_lines[0].len(), 1);
     }
@@ -238,7 +340,14 @@ mod tests {
     #[test]
     fn an_empty_cell_still_has_one_row_in_the_middle_of_its_padding() {
         let line = "|  | b |";
-        let item = TableRowItem::build(&row(line, 2), line, 0, px(200.), &mut wrap_every);
+        let item = TableRowItem::build(
+            &row(line, 2),
+            line,
+            0,
+            px(200.),
+            &mut wrap_every,
+            &mut chars,
+        );
         assert_eq!(item.rows, 1);
         assert_eq!(item.cell_lines[0].as_slice(), &[2..2]);
     }
@@ -246,7 +355,14 @@ mod tests {
     #[test]
     fn a_missing_cell_is_padded_at_the_line_end() {
         let line = "| a |";
-        let item = TableRowItem::build(&row(line, 3), line, 0, px(300.), &mut wrap_every);
+        let item = TableRowItem::build(
+            &row(line, 3),
+            line,
+            0,
+            px(300.),
+            &mut wrap_every,
+            &mut chars,
+        );
         assert_eq!(item.cell_lines.len(), 3);
         assert_eq!(item.cell_lines[2].as_slice(), &[5..5]);
     }
@@ -256,7 +372,7 @@ mod tests {
         let line = "| a |";
         let mut bad = row(line, 1);
         bad.cells[0].content = 2..40;
-        let item = TableRowItem::build(&bad, line, 0, px(300.), &mut wrap_every);
+        let item = TableRowItem::build(&bad, line, 0, px(300.), &mut wrap_every, &mut chars);
         assert_eq!(item.cell_lines[0].as_slice(), &[2..5]);
     }
 
@@ -264,7 +380,7 @@ mod tests {
     fn the_same_cells_are_the_same_shape_whatever_the_table_s_extent() {
         let line = "| a | b |";
         let mut r = row(line, 2);
-        let item = TableRowItem::build(&r, line, 0, px(300.), &mut wrap_every);
+        let item = TableRowItem::build(&r, line, 0, px(300.), &mut wrap_every, &mut chars);
         r.first_row = 7;
         r.last_row = 9;
         assert!(item.same_shape(&r));
@@ -277,7 +393,14 @@ mod tests {
         // 40 characters at one per row: 40 rows wanted, 32 kept.
         let text = "x".repeat(40);
         let line = format!("| {text} |");
-        let item = TableRowItem::build(&row(&line, 1), &line, 0, px(22.), &mut wrap_every);
+        let item = TableRowItem::build(
+            &row(&line, 1),
+            &line,
+            0,
+            px(22.),
+            &mut wrap_every,
+            &mut chars,
+        );
         assert_eq!(item.rows, MAX_ROWS_PER_CELL);
         assert_eq!(item.cell_lines[0].len(), MAX_ROWS_PER_CELL);
         assert_eq!(
@@ -288,8 +411,71 @@ mod tests {
     }
 
     #[test]
-    fn cell_width_is_a_pure_function_of_the_table_s_width_and_columns() {
-        assert_eq!(cell_text_width(px(100.), 2), px(38.));
-        assert_eq!(cell_text_width(px(10.), 200), px(1.), "never zero");
+    fn without_a_measure_for_every_column_the_columns_are_equal() {
+        assert_eq!(
+            column_spans(px(100.), 2, &[]),
+            vec![(px(0.), px(50.)), (px(50.), px(50.))]
+        );
+        assert_eq!(
+            column_spans(px(100.), 2, &[px(10.)]),
+            vec![(px(0.), px(50.)), (px(50.), px(50.))],
+            "one measure for two columns is a misreport, not a size"
+        );
+    }
+
+    #[test]
+    fn a_table_that_fits_is_as_wide_as_its_columns_want() {
+        let spans = column_spans(px(1000.), 2, &[px(20.), px(200.)]);
+        assert_eq!(
+            spans,
+            vec![(px(0.), MIN_COLUMN), (MIN_COLUMN, px(200.) + CELL_PAD * 2.)],
+            "a narrow column keeps the minimum, the other its text and padding"
+        );
+    }
+
+    #[test]
+    fn a_table_that_does_not_fit_spans_the_width_and_the_wide_columns_share_it() {
+        let spans = column_spans(px(300.), 3, &[px(20.), px(1000.), px(1000.)]);
+        let widths: Vec<Pixels> = spans.iter().map(|&(_, w)| w).collect();
+        assert_eq!(
+            widths[0], MIN_COLUMN,
+            "the narrow column keeps what it wants"
+        );
+        assert_eq!(widths[1], widths[2], "equal wants share equally");
+        let total = spans.last().map(|&(x, w)| x + w).unwrap();
+        assert!(
+            (f32::from(total) - 300.).abs() < 0.01,
+            "spans the width: {total:?}"
+        );
+    }
+
+    #[test]
+    fn a_narrow_column_does_not_wrap_because_a_wide_one_is_beside_it() {
+        // The equal split this replaces gave the two-digit column half of
+        // 300px and wrapped the description at fifteen characters.
+        let line = "| 12 | a description of thirty-one |";
+        let mut numbers = row(line, 2);
+        numbers.widest = vec!["12".into(), "a description of thirty-one".into()];
+        let item = TableRowItem::build(&numbers, line, 0, px(300.), &mut wrap_every, &mut chars);
+        assert!(item.spans[0].1 < px(100.), "{:?}", item.spans);
+        assert_eq!(item.cell_lines[0].len(), 1);
+        assert!(
+            item.cell_lines[1].len() > 1,
+            "the long cell takes the wrapping"
+        );
+    }
+
+    #[test]
+    fn a_row_whose_widest_cells_changed_is_a_new_shape() {
+        let line = "| a | b |";
+        let mut r = row(line, 2);
+        r.widest = vec!["a".into(), "b".into()];
+        let item = TableRowItem::build(&r, line, 0, px(300.), &mut wrap_every, &mut chars);
+        assert!(item.same_shape(&r));
+        r.widest[1] = "bbbb".into();
+        assert!(
+            !item.same_shape(&r),
+            "another row's cell grew, so every row moves"
+        );
     }
 }

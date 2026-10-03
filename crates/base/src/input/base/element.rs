@@ -22,6 +22,7 @@ use crate::{
         blink_cursor::CURSOR_WIDTH,
         display_map::{LineLayout, normalize_concealed},
     },
+    theme::ActiveTheme as _,
 };
 
 use super::{
@@ -454,8 +455,13 @@ fn render_inline_widget<M: InputModeKind>(
     buffer_line: usize,
     style: &crate::input::InputEditorStyle,
     state: gpui::WeakEntity<InputBaseState<M>>,
-) -> impl IntoElement {
-    let crate::input::InlineWidgetKind::Checkbox { mark } = widget.kind;
+) -> gpui::AnyElement {
+    let mark = match widget.kind {
+        crate::input::InlineWidgetKind::Checkbox { mark } => mark,
+        crate::input::InlineWidgetKind::Bullet { depth } => {
+            return bullet(depth, style.foreground).into_any_element();
+        }
+    };
     let range = widget.range.clone();
     let fill = style.foreground;
     let (border, background) = task_box_colours(mark, style);
@@ -522,6 +528,27 @@ fn render_inline_widget<M: InputModeKind>(
                 state.toggle_task_marker(range.clone(), checked, window, cx);
             });
         })
+        .into_any_element()
+}
+
+/// The side of a list bullet's dot.
+const BULLET_DOT: Pixels = px(5.);
+
+/// A list bullet centred in its marker's room: a dot, a ring, a square, by
+/// nesting depth, as the Markdown renderer's `•`, `◦`, `▪`.
+fn bullet(depth: u8, ink: gpui::Hsla) -> gpui::Div {
+    let mark = gpui::div().size(BULLET_DOT);
+    let mark = match depth % 3 {
+        0 => mark.rounded_full().bg(ink),
+        1 => mark.rounded_full().border_1().border_color(ink),
+        _ => mark.size(BULLET_DOT - px(1.)).bg(ink),
+    };
+    gpui::div()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(mark)
 }
 
 struct FoldIconLayout {
@@ -1848,7 +1875,12 @@ impl<M: InputModeKind> TextElement<M> {
                 let end = line
                     .position_for_index(widget.range.end, last_layout, false)
                     .unwrap_or(at);
-                let width = (end.x - at.x).max(TASK_BOX);
+                let bullet = matches!(widget.kind, crate::input::InlineWidgetKind::Bullet { .. });
+                let width = if bullet {
+                    end.x - at.x
+                } else {
+                    (end.x - at.x).max(TASK_BOX)
+                };
                 let widget_bounds = Bounds {
                     origin: line_origin + at,
                     size: gpui::size(width, line.row_height(line_height)),
@@ -1871,7 +1903,10 @@ impl<M: InputModeKind> TextElement<M> {
                     window,
                     cx,
                 );
-                hitboxes.push(widget_bounds);
+                // A bullet is drawn, not clicked: a press on it is the text's.
+                if !bullet {
+                    hitboxes.push(widget_bounds);
+                }
                 out.push(InlineWidgetLayout { element });
             }
             offset_y += line.size(line_height).height;
@@ -2593,17 +2628,35 @@ impl<M: InputModeKind> TextElement<M> {
                 continue;
             }
 
+            // The line's code is drawn in the font its rows were measured in,
+            // from the same record the wrapper kept.
+            let mono_runs;
+            let (line_runs, line_run_offset) = match (
+                line_item.monospace.as_deref(),
+                state.display_map.mono_font(),
+            ) {
+                (Some(monospace), Some(mono_font)) => {
+                    mono_runs = with_font(
+                        runs_for_range(runs, run_offset, &(0..line_text.len())),
+                        monospace,
+                        mono_font,
+                    );
+                    (&mono_runs[..], 0)
+                }
+                _ => (runs, run_offset),
+            };
             let mut wrapped_lines: SmallVec<[ShapedLine; 1]> = SmallVec::with_capacity(1);
             for range in &line_item.wrapped_lines[..] {
                 // `shape_wrapped_range` builds its own runs, so the background
                 // flag is read from the same source it starts from.
-                line_has_background |= has_background(&runs_for_range(runs, run_offset, range));
+                line_has_background |=
+                    has_background(&runs_for_range(line_runs, line_run_offset, range));
                 wrapped_lines.push(Self::shape_wrapped_range(
                     &line_text,
                     range,
                     &concealed,
-                    runs,
-                    run_offset,
+                    line_runs,
+                    line_run_offset,
                     bg_segments,
                     line_start,
                     line_font_size,
@@ -2710,14 +2763,16 @@ impl<M: InputModeKind> TextElement<M> {
         use crate::input::TableRowKind;
         use crate::input::table_layout::{CellLayout, ColumnGeometry, TableChrome, TableRowLayout};
 
-        let column_count = item.columns.max(1);
-        let column_width = wrap_width / column_count as f32;
-        let columns = (0..column_count)
-            .map(|c| ColumnGeometry {
-                x: column_width * c as f32,
-                width: column_width,
-            })
+        // Where the wrapper sized the columns, so the cells are drawn in the
+        // widths their text was wrapped at.
+        let columns: Vec<ColumnGeometry> = item
+            .spans
+            .iter()
+            .map(|&(x, width)| ColumnGeometry { x, width })
             .collect();
+        let table_width = columns
+            .last()
+            .map_or(wrap_width, |column| column.x + column.width);
         let header = item.kind == TableRowKind::Header;
 
         // The cell the selection lies inside, when both of its ends lie
@@ -2805,7 +2860,7 @@ impl<M: InputModeKind> TextElement<M> {
             concealed: concealed.to_vec(),
             text_row_height,
             rows,
-            width: wrap_width,
+            width: table_width,
             len: line_text.len(),
             focused: focused.map(|(cell, _, _)| cell),
             first: !neighbour_is_table(buffer_line.checked_sub(1)),
@@ -3242,8 +3297,16 @@ impl<M: InputModeKind> Element for TextElement<M> {
             window.text_system().layout_width(font_id, text_size, ' ')
         };
 
+        // The family reading mode sets code in, so a span of code reads the
+        // same in both modes.
+        let mono_font = gpui::Font {
+            family: cx.theme().tokens.typography.mono.clone(),
+            ..font.clone()
+        };
         self.state.update(cx, |state, cx| {
-            state.display_map.set_font(font, text_size, cx);
+            state
+                .display_map
+                .set_font(font, Some(mono_font), text_size, cx);
             state.display_map.ensure_text_prepared(&state.text, cx);
         });
 
@@ -4189,6 +4252,52 @@ pub(super) fn conceal_wrapped_line(
     }
 
     (text.into(), result)
+}
+
+/// `runs` with `ranges` of them set in `font`, splitting a run where a range
+/// starts or ends inside it. Both are relative to the same start.
+pub(super) fn with_font(
+    runs: Vec<TextRun>,
+    ranges: &[Range<usize>],
+    font: &gpui::Font,
+) -> Vec<TextRun> {
+    let mut out = Vec::with_capacity(runs.len() + ranges.len() * 2);
+    let mut start = 0;
+    for run in runs {
+        let end = start + run.len;
+        let mut at = start;
+        for range in ranges {
+            if range.end <= at || range.start >= end {
+                continue;
+            }
+            if range.start > at {
+                out.push(TextRun {
+                    len: range.start - at,
+                    ..run.clone()
+                });
+                at = range.start;
+            }
+            let stop = range.end.min(end);
+            out.push(TextRun {
+                len: stop - at,
+                font: gpui::Font {
+                    weight: run.font.weight,
+                    style: run.font.style,
+                    ..font.clone()
+                },
+                ..run.clone()
+            });
+            at = stop;
+        }
+        if at < end {
+            out.push(TextRun {
+                len: end - at,
+                ..run
+            });
+        }
+        start = end;
+    }
+    out
 }
 
 /// Get the runs for the given range.

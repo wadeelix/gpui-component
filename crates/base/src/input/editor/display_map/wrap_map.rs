@@ -102,9 +102,11 @@ impl WrapMap {
         &mut self,
         scale: Option<super::text_wrapper::LineHeightScale>,
         table_rows: Option<super::text_wrapper::TableRowSource>,
+        line_shapes: Option<super::text_wrapper::LineShapeSource>,
         cx: &mut App,
     ) {
-        self.wrapper.set_line_hooks(scale, table_rows, cx);
+        self.wrapper
+            .set_line_hooks(scale, table_rows, line_shapes, cx);
     }
 
     pub(super) fn rewrap(&mut self, range: Range<usize>, cx: &mut App) {
@@ -151,8 +153,18 @@ impl WrapMap {
     }
 
     /// Set font parameters
-    pub(super) fn set_font(&mut self, font: Font, font_size: Pixels, cx: &mut App) {
-        self.wrapper.set_font(font, font_size, cx);
+    pub(super) fn set_font(
+        &mut self,
+        font: Font,
+        mono_font: Option<Font>,
+        font_size: Pixels,
+        cx: &mut App,
+    ) {
+        self.wrapper.set_font(font, mono_font, font_size, cx);
+    }
+
+    pub(super) fn mono_font(&self) -> Option<&Font> {
+        self.wrapper.mono_font()
     }
 
     /// Ensure text is prepared (initializes wrapper if needed)

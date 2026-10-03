@@ -12,7 +12,7 @@ use smallvec::SmallVec;
 use sum_tree::{Bias, Dimensions, SumTree};
 
 use crate::input::{
-    Point as TreeSitterPoint, RopeExt, TableRow,
+    LineShape, Point as TreeSitterPoint, RopeExt, TableRow,
     layout::{LastLayout, WhitespaceIndicators},
 };
 
@@ -50,6 +50,10 @@ pub(crate) struct LineItem {
     /// Set when this line is a table row: its cells, wrapped. Such a line
     /// has one wrap row, `height_scale` tall, which is `rows` text rows.
     pub(crate) table: Option<std::sync::Arc<TableRowItem>>,
+    /// Byte ranges of the line, relative to its start, set in the monospace
+    /// font: what the application said at wrap time (`LineShape`), kept so
+    /// the layout draws with the font the rows were measured in.
+    pub(crate) monospace: Option<std::sync::Arc<[Range<usize>]>>,
 }
 
 impl LineItem {
@@ -165,6 +169,11 @@ pub type LineHeightScale = Rc<dyn Fn(&Range<usize>, &Rope, u64) -> f32>;
 /// rebuild so one table's parse can be shared across its rows.
 pub type TableRowSource = Rc<dyn Fn(&Range<usize>, &Rope, u64) -> Option<TableRow>>;
 
+/// How a buffer line wraps and which of its bytes are monospace, supplied by
+/// the application (see `InputHighlighter::line_shape`), asked as
+/// `TableRowSource` is.
+pub type LineShapeSource = Rc<dyn Fn(&Range<usize>, &Rope, u64) -> LineShape>;
+
 /// Keeps a scale usable as a height: finite, positive, and not so large that a
 /// single line could dominate the document. A hostile or buggy value would
 /// otherwise poison every sum in the tree.
@@ -174,6 +183,129 @@ fn normalize_scale(scale: f32) -> f32 {
     } else {
         1.0
     }
+}
+
+/// The application's monospace ranges kept inside `line`, on char boundaries,
+/// sorted and apart: a misreport must not panic the wrap or the layout.
+fn clamp_monospace(line: &str, ranges: &[Range<usize>]) -> Vec<Range<usize>> {
+    let mut out: Vec<Range<usize>> = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        let end = range.end.min(line.len());
+        let start = range.start.min(end);
+        if start == end || !line.is_char_boundary(start) || !line.is_char_boundary(end) {
+            continue;
+        }
+        if out.last().is_some_and(|last| start < last.end) {
+            continue;
+        }
+        out.push(start..end);
+    }
+    out
+}
+
+/// `ranges` as seen from byte `by` of their line: what is left of them past
+/// it, rebased to start there.
+fn shift_monospace(ranges: &[Range<usize>], by: usize) -> Vec<Range<usize>> {
+    ranges
+        .iter()
+        .filter(|range| range.end > by)
+        .map(|range| range.start.max(by) - by..range.end - by)
+        .collect()
+}
+
+/// The fragments a line is wrapped as when `monospace` ranges of it are set
+/// in another font than the wrapper measures in.
+///
+/// Each word of such a range is one element as wide as its glyphs in that
+/// font, `mono_width`; the spaces between words stay text, so the wrapper can
+/// still break at them, and the width a space gains in the monospace font is
+/// carried by the word before it (`space_gain`). A word wider than `max` is
+/// a run of one-character elements instead, so a row can still end inside
+/// it rather than overflow, as a long word of prose does.
+fn monospace_fragments<'a>(
+    line: &'a str,
+    monospace: &[Range<usize>],
+    max: Pixels,
+    space_gain: Pixels,
+    mono_width: &mut dyn FnMut(&str) -> Pixels,
+) -> Vec<LineFragment<'a>> {
+    enum Piece {
+        Text(Range<usize>),
+        Element(Pixels, usize),
+    }
+    let mut pieces = Vec::new();
+    let mut offset = 0;
+    for range in monospace {
+        if offset < range.start {
+            pieces.push(Piece::Text(offset..range.start));
+        }
+        let mut gain = px(0.);
+        let mut last_word: Option<usize> = None;
+        let text = &line[range.clone()];
+        let mut at = range.start;
+        for (is_space, run) in runs_of(text, |c| c == ' ') {
+            let len = run.len();
+            if is_space {
+                let extra = space_gain * len as f32;
+                match last_word {
+                    Some(ix) => {
+                        if let Piece::Element(width, _) = &mut pieces[ix] {
+                            *width += extra;
+                        }
+                    }
+                    None => gain += extra,
+                }
+                pieces.push(Piece::Text(at..at + len));
+            } else {
+                let width = mono_width(run);
+                if width > max {
+                    for c in run.chars() {
+                        let mut buf = [0; 4];
+                        pieces.push(Piece::Element(
+                            mono_width(c.encode_utf8(&mut buf)),
+                            c.len_utf8(),
+                        ));
+                    }
+                } else {
+                    pieces.push(Piece::Element(width, len));
+                }
+                if let Some(Piece::Element(width, _)) = pieces.last_mut() {
+                    *width += gain;
+                    gain = px(0.);
+                }
+                last_word = Some(pieces.len() - 1);
+            }
+            at += len;
+        }
+        offset = range.end;
+    }
+    if offset < line.len() {
+        pieces.push(Piece::Text(offset..line.len()));
+    }
+    pieces
+        .into_iter()
+        .map(|piece| match piece {
+            Piece::Text(range) => LineFragment::text(&line[range]),
+            Piece::Element(width, len) => LineFragment::element(width, len),
+        })
+        .collect()
+}
+
+/// `text` split into maximal runs of characters that do or do not satisfy
+/// `pred`, each with which it is.
+fn runs_of(text: &str, pred: impl Fn(char) -> bool) -> impl Iterator<Item = (bool, &str)> {
+    let mut rest = text;
+    std::iter::from_fn(move || {
+        let first = rest.chars().next()?;
+        let kind = pred(first);
+        let end = rest
+            .char_indices()
+            .find(|&(_, c)| pred(c) != kind)
+            .map_or(rest.len(), |(ix, _)| ix);
+        let (run, tail) = rest.split_at(end);
+        rest = tail;
+        Some((kind, run))
+    })
 }
 
 /// Ceiling for one line's height, in base line heights.
@@ -242,6 +374,12 @@ pub(crate) struct TextWrapper {
     /// Which lines are table rows, supplied by the application. `None` lays
     /// every line out as prose.
     table_rows: Option<TableRowSource>,
+    /// Hanging indents and monospace ranges, supplied by the application.
+    /// `None` wraps every line as plain text in one font.
+    line_shapes: Option<LineShapeSource>,
+    /// The font the application's monospace ranges are measured and drawn
+    /// in. `None` sets them in the text font.
+    mono_font: Option<Font>,
     /// Bumped once per rebuild, handed to `table_rows` so it can cache.
     generation: u64,
     /// The lines by split \n
@@ -262,6 +400,8 @@ impl TextWrapper {
             wrapping_indent: WrappingIndent::default(),
             height_scale: None,
             table_rows: None,
+            line_shapes: None,
+            mono_font: None,
             generation: 0,
             lines: SumTree::new(&()),
             inline_metrics: Rc::from([]),
@@ -365,16 +505,19 @@ impl TextWrapper {
         self.update_all(&self.text.clone(), cx);
     }
 
-    /// Installs the height multiplier and the table-row source together and
-    /// rebuilds every line once, since either may change any line's height.
+    /// Installs the height multiplier, the table-row source and the line
+    /// shapes together and rebuilds every line once, since any of them may
+    /// change any line's rows.
     pub(crate) fn set_line_hooks(
         &mut self,
         scale: Option<LineHeightScale>,
         table_rows: Option<TableRowSource>,
+        line_shapes: Option<LineShapeSource>,
         cx: &mut App,
     ) {
         self.height_scale = scale;
         self.table_rows = table_rows;
+        self.line_shapes = line_shapes;
         self.update_all(&self.text.clone(), cx);
     }
 
@@ -435,12 +578,23 @@ impl TextWrapper {
         (row, height - self.line_top(row))
     }
 
-    pub(crate) fn set_font(&mut self, font: Font, font_size: Pixels, cx: &mut App) {
-        if self.font.eq(&font) && self.font_size == font_size {
+    pub(crate) fn mono_font(&self) -> Option<&Font> {
+        self.mono_font.as_ref()
+    }
+
+    pub(crate) fn set_font(
+        &mut self,
+        font: Font,
+        mono_font: Option<Font>,
+        font_size: Pixels,
+        cx: &mut App,
+    ) {
+        if self.font.eq(&font) && self.mono_font == mono_font && self.font_size == font_size {
             return;
         }
 
         self.font = font;
+        self.mono_font = mono_font;
         self.font_size = font_size;
         self.update_all(&self.text.clone(), cx);
     }
@@ -470,15 +624,26 @@ impl TextWrapper {
         new_text: &Rope,
         cx: &mut App,
     ) {
-        let mut line_wrapper = cx
-            .text_system()
-            .line_wrapper(self.font.clone(), self.font_size);
+        let text_system = cx.text_system().clone();
+        let mut line_wrapper = text_system.line_wrapper(self.font.clone(), self.font_size);
         let metrics = self.inline_metrics.clone();
-        self._update(
+        let font_size = self.font_size;
+        let font_id = text_system.resolve_font(&self.font);
+        let mono_id = self
+            .mono_font
+            .as_ref()
+            .map_or(font_id, |font| text_system.resolve_font(font));
+        let width_in = |id, text: &str| {
+            text.chars().fold(px(0.), |width, c| {
+                width + text_system.layout_width(id, font_size, c)
+            })
+        };
+        let space_gain = (width_in(mono_id, " ") - width_in(font_id, " ")).max(px(0.));
+        self._update_shaped(
             changed_text,
             range,
             new_text,
-            &mut |line_str, wrap_width, line_start| {
+            &mut |line_str, wrap_width, line_start, monospace| {
                 let mut fragments = Vec::new();
                 let mut offset = 0;
                 let first = metrics.partition_point(|(r, _)| r.end <= line_start);
@@ -501,6 +666,16 @@ impl TextWrapper {
                     fragments.push(LineFragment::element(*width, range.len()));
                     offset = range.end;
                 }
+                if fragments.is_empty() && !monospace.is_empty() {
+                    let fragments = monospace_fragments(
+                        line_str,
+                        monospace,
+                        wrap_width,
+                        space_gain,
+                        &mut |text| width_in(mono_id, text),
+                    );
+                    return line_wrapper.wrap_line(&fragments, wrap_width).collect();
+                }
                 if fragments.is_empty() {
                     return line_wrapper
                         .wrap_line(&[LineFragment::text(line_str)], wrap_width)
@@ -511,6 +686,7 @@ impl TextWrapper {
                 }
                 line_wrapper.wrap_line(&fragments, wrap_width).collect()
             },
+            &mut |text| width_in(font_id, text),
         );
     }
 
@@ -591,6 +767,9 @@ impl TextWrapper {
         }
     }
 
+    /// [`Self::_update_shaped`] with a wrapper that knows one font: the
+    /// monospace ranges are wrapped as text, and a character measures one
+    /// pixel. For tests whose wrapper reasons in characters.
     fn _update<F>(
         &mut self,
         changed_text: &Rope,
@@ -599,6 +778,30 @@ impl TextWrapper {
         wrap_line: &mut F,
     ) where
         F: FnMut(&str, Pixels, usize) -> Vec<gpui::Boundary>,
+    {
+        self._update_shaped(
+            changed_text,
+            range,
+            new_text,
+            &mut |line, width, start, _| wrap_line(line, width, start),
+            &mut |text| px(text.chars().count() as f32),
+        );
+    }
+
+    /// Rebuilds the rows an edit touched. `wrap_line` wraps a line at a width
+    /// given the line's offset and its monospace ranges (relative to the line
+    /// it is handed); `measure` is the width of a run of text in the text
+    /// font, which is what a hanging indent takes off its rows.
+    fn _update_shaped<F, M>(
+        &mut self,
+        changed_text: &Rope,
+        range: &Range<usize>,
+        new_text: &Rope,
+        wrap_line: &mut F,
+        measure: &mut M,
+    ) where
+        F: FnMut(&str, Pixels, usize, &[Range<usize>]) -> Vec<gpui::Boundary>,
+        M: FnMut(&str) -> Pixels,
     {
         self.generation = self.generation.wrapping_add(1);
 
@@ -670,8 +873,14 @@ impl TextWrapper {
                         continue;
                     }
                 }
-                let item =
-                    TableRowItem::build(&table_row, &line_str, line_start, wrap_width, wrap_line);
+                let item = TableRowItem::build(
+                    &table_row,
+                    &line_str,
+                    line_start,
+                    wrap_width,
+                    &mut |text: &str, width, start| wrap_line(text, width, start, &[]),
+                    measure,
+                );
                 let rows = item.rows as f32;
                 new_lines.push(LineItem {
                     len: line.len(),
@@ -681,6 +890,7 @@ impl TextWrapper {
                     // the application scales the text rows, not the count.
                     height_scale: height_scale * rows,
                     table: Some(std::sync::Arc::new(item)),
+                    monospace: None,
                 });
                 continue;
             }
@@ -689,25 +899,60 @@ impl TextWrapper {
             let mut prev_boundary_ix = 0;
             let mut indent_chars = 0;
 
+            let shape = self.ask_line_shape(&line_range, changed_text);
+            let mono = clamp_monospace(&line_str, &shape.monospace);
+            // A hang must leave the rows under it most of the width: a list
+            // nested deep in a narrow pane wraps at the margin instead.
+            let hang = shape
+                .hang
+                .filter(|&h| h > 0 && h < line_str.len() && line_str.is_char_boundary(h))
+                .zip(wrap_width)
+                .map(|(h, width)| (h, measure(&line_str[..h]), width))
+                .filter(|&(_, indent, width)| indent < width / 2.);
+
             // If wrap_width is Pixels::MAX, skip wrapping to disable word wrap
             if let Some(wrap_width) = wrap_width {
-                match self.wrapping_indent {
-                    WrappingIndent::Same => {
+                // The first row is wrapped at the full width; the rest at what
+                // the hang leaves, and they start under its byte. A first row
+                // that breaks before the hang (a marker wider than the pane)
+                // has nothing to hang under, and wraps as the line it is.
+                let hang = hang.and_then(|(h, indent, _)| {
+                    wrap_line(&line_str, wrap_width, line_start, &mono)
+                        .first()
+                        .map(|b| b.ix)
+                        .filter(|&ix| ix >= h)
+                        .map(|first_ix| (h, indent, first_ix))
+                });
+                match (self.wrapping_indent, hang) {
+                    (_, Some((h, indent, first_ix))) => {
+                        wrapped_lines.push(0..first_ix);
+                        prev_boundary_ix = first_ix;
+                        let rest = shift_monospace(&mono, first_ix);
+                        for boundary in wrap_line(
+                            &line_str[first_ix..],
+                            wrap_width - indent,
+                            line_start + first_ix,
+                            &rest,
+                        ) {
+                            let ix = first_ix + boundary.ix;
+                            wrapped_lines.push(prev_boundary_ix..ix);
+                            prev_boundary_ix = ix;
+                        }
+                        indent_chars = line_str[..h].chars().count() as u32;
+                    }
+                    (WrappingIndent::Same, _) => {
                         // Here only have wrapped line, if there is no wrap meet, the `line_wraps`
                         // result will empty.
-                        for boundary in
-                            wrap_line(&line_str, wrap_width, changed_text.line_start_offset(row))
-                        {
+                        for boundary in wrap_line(&line_str, wrap_width, line_start, &mono) {
                             wrapped_lines.push(prev_boundary_ix..boundary.ix);
                             prev_boundary_ix = boundary.ix;
                             indent_chars = boundary.next_indent;
                         }
                     }
-                    WrappingIndent::None => {
+                    (WrappingIndent::None, _) => {
                         // The first visual line keeps the line's leading indentation, so it is
                         // wrapped as is.
-                        let boundaries =
-                            wrap_line(&line_str, wrap_width, changed_text.line_start_offset(row));
+                        let boundaries = wrap_line(&line_str, wrap_width, line_start, &mono);
                         if let Some(first_ix) = boundaries.first().map(|b| b.ix) {
                             wrapped_lines.push(prev_boundary_ix..first_ix);
                             prev_boundary_ix = first_ix;
@@ -715,7 +960,8 @@ impl TextWrapper {
                             for boundary in wrap_line(
                                 &line_str[first_ix..],
                                 wrap_width,
-                                changed_text.line_start_offset(row) + first_ix,
+                                line_start + first_ix,
+                                &shift_monospace(&mono, first_ix),
                             ) {
                                 let ix = first_ix + boundary.ix;
                                 wrapped_lines.push(prev_boundary_ix..ix);
@@ -737,6 +983,7 @@ impl TextWrapper {
                 wrapped_lines,
                 height_scale,
                 table: None,
+                monospace: (!mono.is_empty()).then(|| mono.into()),
             });
         }
 
@@ -755,6 +1002,14 @@ impl TextWrapper {
         }
 
         self.text = changed_text.clone();
+    }
+
+    /// Asks the application how the line at `line_range` wraps.
+    fn ask_line_shape(&self, line_range: &Range<usize>, text: &Rope) -> LineShape {
+        match &self.line_shapes {
+            Some(source) => source(line_range, text, self.generation),
+            None => LineShape::default(),
+        }
     }
 
     /// Asks the application whether the line at `line_range` is a table row.
@@ -1901,6 +2156,7 @@ mod tests {
                     wrapped_lines: smallvec::smallvec![0..2],
                     height_scale: 1.0,
                     table: None,
+                    monospace: None,
                 },
                 LineItem {
                     len: 4,
@@ -1908,6 +2164,7 @@ mod tests {
                     wrapped_lines: smallvec::smallvec![0..2, 2..4],
                     height_scale: 1.0,
                     table: None,
+                    monospace: None,
                 },
                 LineItem {
                     len: 1,
@@ -1915,6 +2172,7 @@ mod tests {
                     wrapped_lines: smallvec::smallvec![0..1],
                     height_scale: 1.0,
                     table: None,
+                    monospace: None,
                 },
             ],
             &(),
@@ -2173,6 +2431,7 @@ mod tests {
                     wrapped_lines: smallvec::smallvec![0..10],
                     height_scale: 1.0,
                     table: None,
+                    monospace: None,
                 },
                 LineItem {
                     len: Rope::from("this one wraps").len(),
@@ -2180,6 +2439,7 @@ mod tests {
                     wrapped_lines: smallvec::smallvec![0..9, 9..14],
                     height_scale: 1.0,
                     table: None,
+                    monospace: None,
                 },
             ],
             &(),
@@ -2233,6 +2493,7 @@ mod tests {
                     wrapped_lines: smallvec::smallvec![0..15],
                     height_scale: 1.0,
                     table: None,
+                    monospace: None,
                 },
                 // range: 16..36
                 LineItem {
@@ -2241,6 +2502,7 @@ mod tests {
                     wrapped_lines: smallvec::smallvec![0..10, 10..20],
                     height_scale: 1.0,
                     table: None,
+                    monospace: None,
                 },
                 // range: 37..56
                 LineItem {
@@ -2249,6 +2511,7 @@ mod tests {
                     wrapped_lines: smallvec::smallvec![0..9, 9..15, 15..20],
                     height_scale: 1.0,
                     table: None,
+                    monospace: None,
                 },
                 // range: 57..79
                 LineItem {
@@ -2257,6 +2520,7 @@ mod tests {
                     wrapped_lines: smallvec::smallvec![0..22],
                     height_scale: 1.0,
                     table: None,
+                    monospace: None,
                 },
             ],
             &(),
@@ -2885,6 +3149,7 @@ mod tests {
                 columns,
                 aligns: vec![crate::input::ColumnAlign::Left; columns],
                 cells: test_cells(&line_of(row)?, Some(columns)),
+                widest: Vec::new(),
             })
         })
     }
@@ -3058,5 +3323,157 @@ mod tests {
         assert_same_as_scratch(&wrapper, &text, &enabled);
         assert_eq!(wrapper.line(1).unwrap().lines_len(), 1);
         assert_eq!(wrapper.line(1).unwrap().height_scale, 3.0);
+    }
+
+    /// A wrapper whose lines are shaped by `shape`, wrapped at `width`.
+    fn shaped_wrapper(text: &Rope, width: Pixels, shape: LineShape) -> TextWrapper {
+        let mut wrapper = TextWrapper::new(test_font(), px(14.), Some(width));
+        wrapper.line_shapes = Some(Rc::new(move |_: &Range<usize>, _: &Rope, _| shape.clone()));
+        wrapper._update_shaped(
+            text,
+            &(0..text.len()),
+            text,
+            &mut |line, width, start, _| {
+                super::super::table_row::test_support::wrap_every(line, width, start)
+            },
+            &mut |text| px(text.chars().count() as f32 * 10.),
+        );
+        wrapper
+    }
+
+    #[test]
+    fn a_wrapped_list_item_hangs_under_its_text() {
+        // Ten characters a row at 100px; the marker's two take 20px off every
+        // row after the first, which therefore holds eight.
+        let text = Rope::from("- abcdefghijklmnopqrstuvwxyz");
+        let hanging = LineShape {
+            hang: Some(2),
+            ..LineShape::default()
+        };
+        let wrapper = shaped_wrapper(&text, px(100.), hanging);
+        let line = wrapper.line(0).unwrap();
+        assert_eq!(
+            line.wrapped_lines.as_slice(),
+            &[0..10, 10..18, 18..26, 26..28]
+        );
+        assert_eq!(
+            line.indent, 2,
+            "the rows after the first start under byte 2"
+        );
+
+        let flush = shaped_wrapper(&text, px(100.), LineShape::default());
+        let line = flush.line(0).unwrap();
+        assert_eq!(line.wrapped_lines.as_slice(), &[0..10, 10..20, 20..28]);
+        assert_eq!(line.indent, 0);
+    }
+
+    #[test]
+    fn a_hang_that_would_take_half_the_row_is_not_taken() {
+        let text = Rope::from("- [ ] abcdefghijklmnopqrstuvwxyz");
+        let hanging = LineShape {
+            hang: Some(6),
+            ..LineShape::default()
+        };
+        let line = shaped_wrapper(&text, px(100.), hanging.clone())
+            .line(0)
+            .unwrap()
+            .clone();
+        assert_eq!(line.indent, 0, "60px of a 100px row is too much to hang");
+        assert_eq!(line.wrapped_lines[1], 10..20);
+
+        let line = shaped_wrapper(&text, px(200.), hanging)
+            .line(0)
+            .unwrap()
+            .clone();
+        assert_eq!(line.indent, 6);
+        assert_eq!(line.wrapped_lines[1], 20..34.min(text.len()));
+    }
+
+    #[test]
+    fn a_line_that_does_not_wrap_does_not_hang() {
+        let text = Rope::from("- short");
+        let hanging = LineShape {
+            hang: Some(2),
+            ..LineShape::default()
+        };
+        let line = shaped_wrapper(&text, px(100.), hanging)
+            .line(0)
+            .unwrap()
+            .clone();
+        assert_eq!(line.wrapped_lines.as_slice(), &[0..7]);
+        assert_eq!(line.indent, 0);
+    }
+
+    #[test]
+    fn monospace_ranges_reach_the_wrap_and_are_kept_with_the_line() {
+        let text = Rope::from("a `code` b\nplain");
+        let mut wrapper = TextWrapper::new(test_font(), px(14.), Some(px(1000.)));
+        wrapper.line_shapes = Some(Rc::new(|range: &Range<usize>, _: &Rope, _| LineShape {
+            hang: None,
+            monospace: if range.start == 0 {
+                // One range past the line's end, which must be clamped.
+                vec![2..8, 9..400]
+            } else {
+                Vec::new()
+            },
+        }));
+        let mut seen = Vec::new();
+        wrapper._update_shaped(
+            &text,
+            &(0..text.len()),
+            &text,
+            &mut |_, _, _, monospace| {
+                seen.push(monospace.to_vec());
+                Vec::new()
+            },
+            &mut |text| px(text.len() as f32),
+        );
+        assert_eq!(seen, vec![vec![2..8, 9..10], vec![]]);
+        assert_eq!(
+            wrapper.line(0).unwrap().monospace.as_deref(),
+            Some(&[2..8, 9..10][..])
+        );
+        assert_eq!(wrapper.line(1).unwrap().monospace, None);
+    }
+
+    fn describe(fragments: &[LineFragment]) -> Vec<String> {
+        fragments
+            .iter()
+            .map(|fragment| match fragment {
+                LineFragment::Text { text } => format!("{text:?}"),
+                LineFragment::Element { width, len_utf8 } => {
+                    format!("{}x{len_utf8}", f32::from(*width))
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_monospace_word_is_one_element_and_the_spaces_between_stay_breakable() {
+        let line = "x `ab cd` y";
+        let fragments = monospace_fragments(line, &[2..9], px(1000.), px(4.), &mut |text| {
+            px(text.chars().count() as f32 * 10.)
+        });
+        assert_eq!(
+            describe(&fragments),
+            ["\"x \"", "34x3", "\" \"", "30x3", "\" y\""],
+            "the space a monospace font widens is carried by the word before it"
+        );
+    }
+
+    #[test]
+    fn a_monospace_word_wider_than_the_row_can_still_be_broken() {
+        let fragments = monospace_fragments("abcd", &[0..4], px(20.), px(0.), &mut |text| {
+            px(text.chars().count() as f32 * 10.)
+        });
+        assert_eq!(describe(&fragments), ["10x1", "10x1", "10x1", "10x1"]);
+    }
+
+    #[test]
+    fn leading_spaces_of_a_monospace_range_widen_its_first_word() {
+        let fragments = monospace_fragments("  ab", &[0..4], px(1000.), px(4.), &mut |text| {
+            px(text.chars().count() as f32 * 10.)
+        });
+        assert_eq!(describe(&fragments), ["\"  \"", "28x2"]);
     }
 }

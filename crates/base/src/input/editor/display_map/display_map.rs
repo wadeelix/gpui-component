@@ -11,7 +11,7 @@ use ropey::Rope;
 
 use super::fold_map::FoldMap;
 use super::folding::FoldRange;
-pub use super::text_wrapper::{LineHeightScale, TableRowSource, WrappingIndent};
+pub use super::text_wrapper::{LineHeightScale, LineShapeSource, TableRowSource, WrappingIndent};
 use super::text_wrapper::{LineItem, WrapDisplayPoint};
 use super::wrap_map::WrapMap;
 use super::{BufferPoint, DisplayPoint};
@@ -115,15 +115,17 @@ impl DisplayMap {
         self.wrap_map.set_height_scale(scale, cx);
     }
 
-    /// Installs the per-line height multiplier and the table-row source
-    /// together, rebuilding every line once.
+    /// Installs the per-line height multiplier, the table-row source and the
+    /// line shapes together, rebuilding every line once.
     pub fn set_line_hooks(
         &mut self,
         scale: Option<LineHeightScale>,
         table_rows: Option<TableRowSource>,
+        line_shapes: Option<LineShapeSource>,
         cx: &mut App,
     ) {
-        self.wrap_map.set_line_hooks(scale, table_rows, cx);
+        self.wrap_map
+            .set_line_hooks(scale, table_rows, line_shapes, cx);
     }
 
     /// Re-lays out the lines covering `range` from the current text, for a
@@ -367,10 +369,22 @@ impl DisplayMap {
         self.rebuild_fold_projection();
     }
 
-    /// Set font parameters
-    pub fn set_font(&mut self, font: Font, font_size: Pixels, cx: &mut App) {
-        self.wrap_map.set_font(font, font_size, cx);
+    /// Set font parameters: the text font, and the font a highlighter's
+    /// monospace ranges are set in (`LineShape`), `None` for the text font.
+    pub fn set_font(
+        &mut self,
+        font: Font,
+        mono_font: Option<Font>,
+        font_size: Pixels,
+        cx: &mut App,
+    ) {
+        self.wrap_map.set_font(font, mono_font, font_size, cx);
         self.rebuild_fold_projection();
+    }
+
+    /// The font monospace ranges were measured in, if one was set.
+    pub(crate) fn mono_font(&self) -> Option<&Font> {
+        self.wrap_map.mono_font()
     }
 
     /// Ensure text is prepared (initializes wrapper if needed)

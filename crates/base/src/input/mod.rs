@@ -92,15 +92,15 @@ pub use diagnostics::{
     DiagnosticSummary, DiagnosticTag, RelatedInformation,
 };
 pub use display_map::{
-    BufferPoint, DisplayMap, DisplayPoint, FoldRange, LineHeightScale, TableRowSource,
-    WrappingIndent,
+    BufferPoint, DisplayMap, DisplayPoint, FoldRange, LineHeightScale, LineShapeSource,
+    TableRowSource, WrappingIndent,
 };
 pub use editor::{Editor, EditorState};
 pub use highlighting::{
     BlockContext, BlockRenderer, BlockWidget, ColumnAlign, DiagnosticColors, FoldIconRenderer,
     HighlightStyleResolver, InlineWidget, InlineWidgetKind, InputEditorStyle, InputHighlighter,
-    InputHighlighterFactory, LineDecoration, SharedHighlightStyleResolver, SyntaxContext,
-    SyntaxContextProvider, TableCellSpan, TableRow, TableRowKind,
+    InputHighlighterFactory, LineDecoration, LineShape, SharedHighlightStyleResolver,
+    SyntaxContext, SyntaxContextProvider, TableCellSpan, TableRow, TableRowKind,
 };
 pub use indent::TabSize;
 pub use input::{Input, InputState};
