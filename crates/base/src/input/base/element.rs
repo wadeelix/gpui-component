@@ -425,6 +425,9 @@ pub(super) struct InlineWidgetLayout {
     pub(super) element: gpui::AnyElement,
 }
 
+/// The side of a task box.
+const TASK_BOX: Pixels = px(13.);
+
 /// A task box's outline and fill. The outline is the text's colour in every
 /// state, as the Markdown renderer draws it (`TextNode::task_box`): an open
 /// box once took the field-border colour, a rule meant to sit back, and on
@@ -463,7 +466,7 @@ fn render_inline_widget<M: InputModeKind>(
     // A ticked box carries the tick rather than only being filled: filled
     // alone reads as a blob, and the two states then differ only by weight.
     let mut box_ = gpui::div()
-        .size(px(13.))
+        .size(TASK_BOX)
         .border_1()
         .rounded(px(3.))
         .flex()
@@ -1835,11 +1838,14 @@ impl<M: InputModeKind> TextElement<M> {
                 // text's width — not a square. A row-height box over a
                 // three-character `[ ]` spills past it and lands on the words
                 // after it; the widget draws itself centred in whatever room
-                // the marker occupies.
+                // the marker occupies. Never less than the box it draws: it
+                // was never less than the row's height, which put the box
+                // against the first word and made that word's first letters
+                // the checkbox's to click.
                 let end = line
                     .position_for_index(widget.range.end, last_layout, false)
                     .unwrap_or(at);
-                let width = (end.x - at.x).max(line_height);
+                let width = (end.x - at.x).max(TASK_BOX);
                 let widget_bounds = Bounds {
                     origin: line_origin + at,
                     size: gpui::size(width, line.row_height(line_height)),

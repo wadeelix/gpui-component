@@ -8137,6 +8137,136 @@ mod tests {
         })
     }
 
+    /// A checkbox over `[ ]` at the start of the line.
+    struct TaskHighlighter;
+
+    impl crate::input::InputHighlighter for TaskHighlighter {
+        fn language(&self) -> SharedString {
+            "task-test".into()
+        }
+
+        fn update(
+            &mut self,
+            _edit: Option<crate::input::InputEdit>,
+            _text: &Rope,
+            _folding: bool,
+            _window: &mut Window,
+            _cx: &mut Context<crate::input::EditorState>,
+        ) {
+        }
+
+        fn styles(
+            &self,
+            range: &Range<usize>,
+            _resolver: &dyn crate::input::HighlightStyleResolver,
+        ) -> Vec<(Range<usize>, HighlightStyle)> {
+            vec![(range.clone(), HighlightStyle::default())]
+        }
+
+        fn fold_ranges(&self, _text: &Rope) -> Vec<crate::input::FoldRange> {
+            Vec::new()
+        }
+
+        fn inline_widgets(&self, line_range: &Range<usize>) -> Vec<crate::input::InlineWidget> {
+            if line_range.start != 0 {
+                return Vec::new();
+            }
+            vec![crate::input::InlineWidget {
+                range: 0..3,
+                kind: crate::input::InlineWidgetKind::Checkbox {
+                    mark: crate::text::TaskMark::Todo,
+                },
+            }]
+        }
+    }
+
+    /// A checkbox takes the room of the `[ ]` it stands for and no more, so
+    /// a click on the task's first word places the caret there. Its room was
+    /// never narrower than the row is tall, which reached past the space onto
+    /// the word, and the checkbox took those clicks.
+    #[gpui::test]
+    fn test_a_checkbox_leaves_the_words_after_it_to_the_caret(cx: &mut TestAppContext) {
+        // Rows far taller than the test font's glyphs are wide, as a real
+        // proportional font's are: the room a row's height gave reached past
+        // `[ ] ` onto the word.
+        struct TallRows(Entity<InputBaseState<EditorMode>>);
+        impl Render for TallRows {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .size_full()
+                    .line_height(px(200.))
+                    .child(self.0.clone())
+            }
+        }
+        let mut input: Option<Entity<InputBaseState<EditorMode>>> = None;
+        let window = cx.update(|cx| {
+            cx.open_window(Default::default(), |window, cx| {
+                crate::init(cx);
+                cx.set_global(Theme::default());
+                input = Some(cx.new(|cx| {
+                    crate::input::EditorState::new(window, cx)
+                        .language("sql")
+                        .default_value("[ ] word\nnext")
+                }));
+                cx.new(|_| TallRows(input.clone().unwrap()))
+            })
+            .unwrap()
+        });
+        let input = input.unwrap();
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.update(|_, cx| {
+            input.update(cx, |state, cx| {
+                state.set_highlighter_factory(
+                    Rc::new(|_: &str| {
+                        Some(Box::new(TaskHighlighter) as Box<dyn crate::input::InputHighlighter>)
+                    }),
+                    cx,
+                );
+                state.set_selected_range(10..10, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let (hitbox, word_x, line_height) = cx.update(|_, cx| {
+            input.read_with(cx, |state, _| {
+                let hitboxes = state.widget_hitboxes.borrow();
+                assert_eq!(hitboxes.len(), 1, "one checkbox, one hitbox");
+                let layout = state.last_layout.as_ref().unwrap();
+                let line = &layout.lines[0];
+                let box_x = line.position_for_index(0, layout, false).unwrap().x;
+                let word_x = line.position_for_index(4, layout, false).unwrap().x;
+                (
+                    hitboxes[0],
+                    hitboxes[0].origin.x + (word_x - box_x),
+                    layout.line_height,
+                )
+            })
+        });
+        assert!(
+            word_x < hitbox.origin.x + line_height,
+            "the word starts within a row's height of the box, so the old room reached it"
+        );
+        assert!(
+            hitbox.right() <= word_x,
+            "the checkbox's room ends before the word: {:?} vs {:?}",
+            hitbox.right(),
+            word_x
+        );
+
+        let on_word = point(word_x + px(1.), hitbox.center().y);
+        cx.simulate_mouse_down(on_word, gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_up(on_word, gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.run_until_parked();
+        let selected = cx.update(|_, cx| input.read_with(cx, |state, _| state.selected_range()));
+        assert!(
+            (4..=5).contains(&selected.start),
+            "the click placed the caret in the word: {selected:?}"
+        );
+    }
+
     /// A block is drawn over its line at the height the line was given, told
     /// its range and size, and a click inside it does not move the caret.
     #[gpui::test]
