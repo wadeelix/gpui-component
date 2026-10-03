@@ -501,14 +501,17 @@ fn render_inline_widget<M: InputModeKind>(
     }
 
     // Fills the room it was given so the box lands on the text's centre line:
-    // sized to its child instead, it sat at the top of the row.
+    // sized to its child instead, it sat at the top of the row. Set at the
+    // room's start rather than its middle: `[/]` is wider than `[ ]`, and a
+    // centred box stood a few pixels further right on such a line, so a
+    // column of tasks in mixed states was not a column.
     gpui::div()
         .id(("inline-checkbox", buffer_line))
         .cursor_pointer()
         .size_full()
         .flex()
         .items_center()
-        .justify_center()
+        .justify_start()
         .child(box_)
         .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
             cx.stop_propagation();
