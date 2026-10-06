@@ -31,6 +31,7 @@ pub enum WrappingIndent {
 
 /// Choose Unicode line-break opportunities using the same shaped widths as
 /// painting. Oversized words fall back to complete graphemes, never UTF-8 bytes.
+#[cfg(test)]
 fn measured_wrap_boundaries(
     text: &str,
     width: Pixels,
