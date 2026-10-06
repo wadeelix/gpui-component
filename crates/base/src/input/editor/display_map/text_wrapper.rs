@@ -37,6 +37,18 @@ fn measured_wrap_boundaries(
     wrapping_indent: WrappingIndent,
     mut measure: impl FnMut(&str) -> Pixels,
 ) -> Vec<gpui::Boundary> {
+    measured_wrap_boundaries_in(text, width, wrapping_indent, |range| measure(&text[range]))
+}
+
+/// [`measured_wrap_boundaries`] with `measure` given byte ranges of `text`,
+/// so a caller can shape the line once and read every prefix's width off its
+/// glyph positions rather than shape each prefix again.
+fn measured_wrap_boundaries_in(
+    text: &str,
+    width: Pixels,
+    wrapping_indent: WrappingIndent,
+    mut measure: impl FnMut(Range<usize>) -> Pixels,
+) -> Vec<gpui::Boundary> {
     let indent = if wrapping_indent == WrappingIndent::Same {
         text.chars()
             .take_while(|&c| c == ' ')
@@ -45,7 +57,7 @@ fn measured_wrap_boundaries(
     } else {
         0
     };
-    let indent_width = measure(&text[..indent]);
+    let indent_width = measure(0..indent);
     let ends: Vec<usize> = text
         .grapheme_indices(true)
         .map(|(ix, grapheme)| ix + grapheme.len())
@@ -55,6 +67,18 @@ fn measured_wrap_boundaries(
         .filter(|ix| ends.binary_search(ix).is_ok())
         .collect();
     let mut result = Vec::new();
+    // Most lines fit, and one shaping says so: probing up from a single
+    // grapheme shaped such a line once per doubling, which on a 100 KB note
+    // was half a second before the window answered.
+    let whole = measure(0..text.len());
+    if whole <= width || ends.is_empty() {
+        return result;
+    }
+    // The line's average grapheme width puts the first probe of every row
+    // within a few graphemes of its end, so a row costs a handful of shapes
+    // rather than two per doubling from one grapheme. The search still ends
+    // on the longest prefix that fits, so the rows are the same.
+    let average = whole / ends.len() as f32;
     let mut first = 0;
     let mut start = 0;
     while first < ends.len() {
@@ -63,21 +87,50 @@ fn measured_wrap_boundaries(
         } else {
             width - indent_width
         };
-        // Find the fitting prefix locally. Exponential probing avoids shaping
-        // the entire remaining logical line for every visual row of a long paste.
         let remaining = ends.len() - first;
-        let mut low = 0;
-        let mut high = 1;
-        while measure(&text[start..ends[first + high - 1]]) <= available {
-            low = high;
-            if high == remaining {
-                break;
+        let mut fits = |count: usize| measure(start..ends[first + count - 1]) <= available;
+        let guess = if average > px(0.) {
+            ((available / average) as usize).clamp(1, remaining)
+        } else {
+            remaining
+        };
+        let mut step = (guess / 32).max(1);
+        // `low` fits (or is 0), `high` does not (or is past the end).
+        let (mut low, mut high) = if fits(guess) {
+            let mut low = guess;
+            loop {
+                if low == remaining {
+                    break (low, remaining + 1);
+                }
+                let next = (low + step).min(remaining);
+                if fits(next) {
+                    low = next;
+                    step *= 2;
+                } else {
+                    break (low, next);
+                }
             }
-            high = (high * 2).min(remaining);
+        } else {
+            let mut high = guess;
+            loop {
+                let next = high.saturating_sub(step);
+                if next == 0 {
+                    break (0, high);
+                }
+                if fits(next) {
+                    break (next, high);
+                }
+                high = next;
+                step *= 2;
+            }
+        };
+        if high > remaining {
+            // The rest of the line fits on this row.
+            break;
         }
         while low + 1 < high {
             let mid = (low + high) / 2;
-            if measure(&text[start..ends[first + mid - 1]]) <= available {
+            if fits(mid) {
                 low = mid;
             } else {
                 high = mid;
@@ -758,27 +811,27 @@ impl TextWrapper {
                         .collect();
                 }
                 if fragments.is_empty() {
-                    return measured_wrap_boundaries(
+                    // Shaped once; every prefix the search tries is read off
+                    // the glyph positions. Shaping each prefix again cost a
+                    // 100 KB note half a second before its window answered.
+                    let layout = window_text_system.layout_line(
+                        line_str,
+                        font_size,
+                        &[gpui::TextRun {
+                            len: line_str.len(),
+                            font: font.clone(),
+                            color: gpui::black(),
+                            background_color: None,
+                            underline: None,
+                            strikethrough: None,
+                        }],
+                        None,
+                    );
+                    return measured_wrap_boundaries_in(
                         line_str,
                         wrap_width,
                         wrapping_indent,
-                        |text| {
-                            window_text_system
-                                .layout_line(
-                                    text,
-                                    font_size,
-                                    &[gpui::TextRun {
-                                        len: text.len(),
-                                        font: font.clone(),
-                                        color: gpui::black(),
-                                        background_color: None,
-                                        underline: None,
-                                        strikethrough: None,
-                                    }],
-                                    None,
-                                )
-                                .width
-                        },
+                        |range| layout.x_for_index(range.end) - layout.x_for_index(range.start),
                     );
                 }
                 if offset < line_str.len() {
@@ -3732,5 +3785,115 @@ mod tests {
             px(text.chars().count() as f32 * 10.)
         });
         assert_eq!(describe(&fragments), ["\"  \"", "28x2"]);
+    }
+
+    /// Upstream's search as v0.7.1 shipped it: probing up from one grapheme.
+    fn upstream_wrap(
+        text: &str,
+        width: Pixels,
+        mut measure: impl FnMut(&str) -> Pixels,
+    ) -> Vec<usize> {
+        let ends: Vec<usize> = text
+            .grapheme_indices(true)
+            .map(|(ix, grapheme)| ix + grapheme.len())
+            .collect();
+        let opportunities: Vec<usize> = unicode_linebreak::linebreaks(text)
+            .map(|(ix, _)| ix)
+            .filter(|ix| ends.binary_search(ix).is_ok())
+            .collect();
+        let mut result = Vec::new();
+        let (mut first, mut start) = (0, 0);
+        while first < ends.len() {
+            let remaining = ends.len() - first;
+            let (mut low, mut high) = (0, 1);
+            while measure(&text[start..ends[first + high - 1]]) <= width {
+                low = high;
+                if high == remaining {
+                    break;
+                }
+                high = (high * 2).min(remaining);
+            }
+            while low + 1 < high {
+                let mid = (low + high) / 2;
+                if measure(&text[start..ends[first + mid - 1]]) <= width {
+                    low = mid;
+                } else {
+                    high = mid;
+                }
+            }
+            let fitting_end = ends[first + low.max(1) - 1];
+            if fitting_end == text.len() {
+                break;
+            }
+            let candidate = opportunities.partition_point(|&ix| ix <= fitting_end);
+            let end = candidate
+                .checked_sub(1)
+                .map(|ix| opportunities[ix])
+                .filter(|&ix| ix > start)
+                .unwrap_or(fitting_end);
+            result.push(end);
+            first = ends.partition_point(|&ix| ix <= end);
+            start = end;
+        }
+        result
+    }
+
+    /// The faster search ends every row where upstream's does, and shapes
+    /// far less: a line that fits once, a row a handful of times.
+    #[test]
+    fn the_guided_wrap_breaks_where_upstream_s_does_with_fewer_shapes() {
+        // Widths that differ per character, as a proportional face's do.
+        let advance = |c: char| match c {
+            'i' | 'l' | '.' => 3.,
+            'm' | 'w' | 'M' => 11.,
+            ' ' => 4.,
+            '中' | '文' => 16.,
+            _ => 7.,
+        };
+        let words = [
+            "a",
+            "lime",
+            "wombat",
+            "ill",
+            "M",
+            "中文",
+            "quite",
+            "x.y",
+            "mmmmmmmmmmmm",
+        ];
+        let mut seed = 0x2545_f491_u32;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed
+        };
+        let (mut ours, mut theirs) = (0usize, 0usize);
+        for _ in 0..400 {
+            let count = (next() % 200) as usize;
+            let line: Vec<&str> = (0..count)
+                .map(|_| words[(next() as usize) % words.len()])
+                .collect();
+            let line = line.join(" ");
+            let width = px(200. + (next() % 800) as f32);
+            let width_of = |s: &str| px(s.chars().map(advance).sum::<f32>());
+            let got: Vec<usize> =
+                measured_wrap_boundaries(&line, width, WrappingIndent::None, |s| {
+                    ours += 1;
+                    width_of(s)
+                })
+                .into_iter()
+                .map(|b| b.ix)
+                .collect();
+            let want = upstream_wrap(&line, width, |s| {
+                theirs += 1;
+                width_of(s)
+            });
+            assert_eq!(got, want, "{line:?} at {width:?}");
+        }
+        assert!(
+            ours * 2 < theirs,
+            "{ours} shapes against upstream's {theirs}"
+        );
     }
 }
