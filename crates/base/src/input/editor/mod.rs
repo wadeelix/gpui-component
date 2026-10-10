@@ -186,8 +186,16 @@ impl InputModeKind for EditorMode {
         window: &mut Window,
     ) -> Stateful<Div> {
         element
-            .on_action(window.listener_for(entity, InputBaseState::on_action_toggle_code_actions))
-            .on_action(window.listener_for(entity, InputBaseState::on_action_go_to_definition))
+            .on_action(super::own_action(
+                window,
+                entity,
+                InputBaseState::on_action_toggle_code_actions,
+            ))
+            .on_action(super::own_action(
+                window,
+                entity,
+                InputBaseState::on_action_go_to_definition,
+            ))
     }
 }
 
