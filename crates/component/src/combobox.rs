@@ -181,8 +181,15 @@ where
 
                         let changes = Self::selection_changes(multiple, &selection, ix, &item);
 
-                        let before_indices: Vec<IndexPath> =
-                            selection.iter().map(|(ix, _)| *ix).collect();
+                        // Compared by value, not by index: indices are positions in
+                        // the list as it was filtered when each pick was made, so the
+                        // first row of a narrowed list has the same index as the first
+                        // row of the whole one, and picking it read as no change -- no
+                        // event, and the popup stayed open.
+                        let before_values: Vec<_> = selection
+                            .iter()
+                            .map(|(_, item)| item.value().clone())
+                            .collect();
 
                         // on_will_change is called directly — entity-handle access would
                         // re-enter the ListState lock that defer_in holds for this callback.
@@ -191,9 +198,11 @@ where
                             .delegate
                             .on_will_change(&mut selection, &changes);
 
-                        let after_indices: Vec<IndexPath> =
-                            selection.iter().map(|(ix, _)| *ix).collect();
-                        let changed = before_indices != after_indices;
+                        let after_values: Vec<_> = selection
+                            .iter()
+                            .map(|(_, item)| item.value().clone())
+                            .collect();
+                        let changed = before_values != after_values;
                         let should_close = changed && !multiple;
 
                         let new_selection = weak_confirm.update(cx, |this, cx| {
